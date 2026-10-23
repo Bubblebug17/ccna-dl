@@ -38,8 +38,11 @@ import { setWaitPolicy } from './wait-policy';
 import {
   AGGRESSIVE_PATTERNS,
   blockUnneededResources,
+  MEDIA_PATTERNS,
   TRACKER_PATTERNS,
 } from './block-resources';
+import { chromeLaunchArgs } from './browser-args';
+import { DEFAULT_RECYCLE_EVERY, DEFAULT_TABS, planTabs } from './memory';
 import { DEFAULT_ASSET_OPTIONS } from './download-assets';
 import sanitize = require('sanitize-filename');
 import { login } from './login';
@@ -80,7 +83,8 @@ const cmd = command({
       short: 'c',
       type: optional(number),
       description:
-        'Páginas descargadas a la vez. Cursos "launch" (HTML offline): pestañas del navegador en paralelo, por defecto 3, máximo 6. ' +
+        'Páginas descargadas a la vez. Cursos "launch" (HTML offline): pestañas del navegador en paralelo, máximo 6; ' +
+        `por defecto ${DEFAULT_TABS} (o menos si hay poca RAM libre). Cada pestaña puede usar ~1 GB; se avisa si no caben en la RAM libre. ` +
         'Modo PDF antiguo: por defecto 10.',
     }),
     outDir: option({
@@ -152,6 +156,19 @@ const cmd = command({
       description:
         'Segundos máximos por intento de capítulo; al agotarse se reinicia esa pestaña y se reintenta.',
     }),
+    recycleEvery: option({
+      long: 'recycle-every',
+      type: number,
+      defaultValue: () => DEFAULT_RECYCLE_EVERY,
+      description:
+        'Cada cuántos capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria del navegador ' +
+        `(0 = nunca; por defecto ${DEFAULT_RECYCLE_EVERY}). También se recicla antes si el heap de JS es alto o queda poca RAM libre.`,
+    }),
+    noBlockMedia: flag({
+      long: 'no-block-media',
+      description:
+        'No bloquear vídeo/audio (mp4, webm, mp3…) en el navegador. Por defecto se bloquean para ahorrar memoria: los archivos se descargan aparte con Node.',
+    }),
     noBlockTrackers: flag({
       long: 'no-block-trackers',
       description:
@@ -212,18 +229,20 @@ const cmd = command({
       fast: args.fast,
       minWaitMs: args.minWait,
     });
-    const blockPatterns = args.noBlockTrackers
-      ? []
-      : [...TRACKER_PATTERNS, ...(args.fast ? AGGRESSIVE_PATTERNS : [])];
-    // pestañas en paralelo: 3 por defecto, entre 1 y 6
-    let tabs = 3;
-    if (args.concurrency !== undefined) {
-      tabs = Math.floor(args.concurrency) || 1;
-      if (tabs > 6) {
-        console.warn(`--concurrency ${tabs} es demasiado alto para el modo HTML; se limita a 6 pestañas (Netacad puede limitar o bloquear muchas pestañas a la vez).`);
-        tabs = 6;
-      }
-      if (tabs < 1) tabs = 1;
+    const blockPatterns = [
+      ...(args.noBlockTrackers ? [] : TRACKER_PATTERNS),
+      ...(args.noBlockMedia ? [] : MEDIA_PATTERNS),
+      ...(args.fast ? AGGRESSIVE_PATTERNS : []),
+    ];
+    // pestañas en paralelo: por defecto min(2, las que caben en la RAM libre); entre 1 y 6
+    if (args.concurrency !== undefined && Math.floor(args.concurrency) > 6) {
+      console.warn(`--concurrency ${Math.floor(args.concurrency)} es demasiado alto para el modo HTML; se limita a 6 pestañas (Netacad puede limitar o bloquear muchas pestañas a la vez).`);
+    }
+    const plan = planTabs(args.concurrency);
+    const tabs = plan.tabs;
+    if (plan.warn) console.warn(plan.warn);
+    else if (plan.auto) {
+      console.log(`Pestañas en paralelo: ${tabs} (automático; RAM libre ~${(plan.freeMb / 1024).toFixed(1)} GB de ${(plan.totalMb / 1024).toFixed(1)} GB). Cambia con --concurrency.`);
     }
     void waitPolicy;
 
@@ -232,11 +251,7 @@ const cmd = command({
       protocolTimeout: 600_000,
       args: [
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--window-size=1400,900',
+        ...chromeLaunchArgs({ headful: args.headful }),
       ],
     });
 
@@ -305,7 +320,7 @@ const cmd = command({
               `Capítulo solicitado: ${args.only} → ${urls.length} URL(s)`
             );
           }
-          console.log('Chapter URLs: ' + urls);
+
           if (urls.length === 0) {
             console.error(
               args.only
@@ -370,6 +385,7 @@ const cmd = command({
               retryFailed: args.retryFailed,
               retries: Math.max(0, Math.floor(args.retries)),
               concurrency: tabs,
+              recycleEvery: Math.max(0, Math.floor(args.recycleEvery)),
               newPage: newWorkerPage,
               chapterTimeoutMs: Math.max(10, args.chapterTimeout) * 1000,
               signal: abort.signal,

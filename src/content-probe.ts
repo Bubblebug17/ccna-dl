@@ -96,7 +96,11 @@ export async function inspectContent(page: Page): Promise<ContentInspection> {
         if ((tag === 'STYLE' || tag === 'SCRIPT') && !el.shadowRoot) return;
         const id = tag.toLowerCase() + (cls ? '.' + cls.split(/\s+/)[0] : '');
         const busy = el.getAttribute('aria-busy') === 'true';
-        if (STRONG.test(tag) || STRONG.test(cls) || busy) {
+        // spinners internos del reproductor de vídeo (video.js): el reproductor se sustituye al guardar
+        const vjs = /(^|\s)vjs-/.test(cls);
+        if (vjs) {
+          // no cuenta como carga pendiente
+        } else if (STRONG.test(tag) || STRONG.test(cls) || busy) {
           if (isShown(el)) out.loaders.push(id);
         } else if (WEAK.test(cls) && out.loaders.length < 20) {
           const r = (el as HTMLElement).getBoundingClientRect();

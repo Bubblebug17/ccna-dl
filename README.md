@@ -32,10 +32,12 @@ descarga de recursos). Por eso la descarga en paralelo usa **varias pestañas de
 
 | Opción | Por defecto | Qué hace |
 | --- | --- | --- |
-| `--concurrency N` | `3` (máx. 6) | Capítulos que se descargan a la vez (pestañas en paralelo). `1` = secuencial como antes. |
+| `--concurrency N` | `2` (o menos si hay poca RAM libre; máx. 6) | Capítulos que se descargan a la vez (pestañas en paralelo). `1` = secuencial como antes. Cada pestaña puede usar ~1 GB de RAM; si `N` no cabe en la RAM libre se avisa. |
+| `--recycle-every N` | `8` | Cada `N` capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria de Chrome (`0` = nunca). También se recicla antes si el heap de JS pasa de ~600 MB o queda poca RAM libre. |
+| `--no-block-media` | bloqueo activo | Por defecto el navegador **no carga** vídeo/audio (mp4, webm, mp3…): ocupan memoria y no hacen falta, los archivos los descarga Node aparte. Con esta opción se cargan como antes. |
 | `--min-wait ms` | `1500` | Espera mínima de asentamiento, **además** de las condiciones (sin spinner/esqueleto, DOM estable, imágenes y red en reposo). Súbela (p. ej. `2500`) si tu conexión es lenta. |
 | `--chapter-timeout s` | `300` | Tiempo máximo por intento de capítulo; al agotarse se reinicia la pestaña y se reintenta. |
-| `--fast` | desactivado | Modo agresivo (opt-in): esperas mínimas más cortas y bloquea también audio/vídeo y `adobedtm`. |
+| `--fast` | desactivado | Modo agresivo (opt-in): esperas mínimas más cortas y bloquea también `adobedtm`. |
 | `--no-block-trackers` | bloqueo activo | No bloquear analíticas/publicidad (por defecto no se cargan; no afectan al contenido). |
 | `--screenshot` | desactivado | Guarda la captura de depuración `course.png`. |
 
@@ -43,7 +45,8 @@ descarga de recursos). Por eso la descarga en paralelo usa **varias pestañas de
   re-captura automáticamente una vez; si aun así queda incompleta se marca `parcial` y al reanudar se rehace.
 - **Ctrl+C**: la primera vez termina de escribir los capítulos en curso (escritura atómica) y para; vuelve a ejecutar **el mismo comando** para continuar (se omiten los ya verificados).
 - Los recursos compartidos entre capítulos (CSS, fuentes, imágenes comunes) se descargan **una sola vez**.
-- Empieza con `--concurrency 3`; si Netacad devuelve errores o "Sesión no válida", baja a `1`–`2`.
+- **Memoria**: Chrome es lo que más RAM gasta. En un PC con ~16 GB usa `--concurrency 2` (por defecto) y no lo subas si el equipo ya va justo; con poca RAM libre usa `--concurrency 1`. Si ves un `Memoria: …` de aviso al arrancar, hazle caso. Más detalle en `DOCUMENTACION.md` (§11).
+- Si Netacad devuelve errores o "Sesión no válida", baja a `1`–`2`.
 
 ## Disclaimer
 

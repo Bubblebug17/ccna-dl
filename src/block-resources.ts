@@ -28,8 +28,15 @@ export const TRACKER_PATTERNS = [
   '*demdex.net*',
 ];
 
-/** Solo con --fast: vídeo/audio (se bajan aparte con fetch) y el gestor de etiquetas de Adobe. */
-export const AGGRESSIVE_PATTERNS = ['*.mp4*', '*.webm*', '*.mp3*', '*.m4a*', '*adobedtm.com*'];
+/**
+ * Vídeo/audio: el navegador no los necesita (ocupan RAM en el renderer al precargarse);
+ * los recursos del capítulo se descargan aparte con fetch desde Node. Se bloquean por defecto
+ * (desactivar con --no-block-media).
+ */
+export const MEDIA_PATTERNS = ['*.mp4*', '*.webm*', '*.mp3*', '*.m4a*', '*.ogv*', '*.m3u8*'];
+
+/** Solo con --fast: vídeo/audio (también con --no-block-media) y el gestor de etiquetas de Adobe. */
+export const AGGRESSIVE_PATTERNS = [...MEDIA_PATTERNS, '*adobedtm.com*'];
 
 export type BlockStats = { blocked: number };
 

@@ -294,3 +294,105 @@ test('bloqueo de trackers por CDP: la petición no llega al servidor', async () 
   assert.ok(fx.hits['/img/ok.png'] >= 1, 'el resto sí carga');
   await p2.close();
 });
+
+// ---------- memoria: reciclado de pestañas, bloqueo de medios, plan de pestañas ----------
+const { planTabs, DEFAULT_TABS, TAB_BUDGET_MB, RESERVE_MB } = require('../lib/memory');
+const { MEDIA_PATTERNS } = require('../lib/block-resources');
+
+test('reciclado de pestañas: mismo resultado, pestañas reabiertas y ninguna fuga de pestañas', async () => {
+  const N = 9;
+  const baseline = outDirFor('rc-base');
+  const rb = await run(urlsFor(N), baseline, { concurrency: 2, recycleEvery: 0, recycleHeapMb: 0, freeMemMb: () => 99999 });
+  let created = 0;
+  const before = (await browser.pages()).length;
+  const logs = [];
+  const dir = outDirFor('rc');
+  const r = await run(urlsFor(N), dir, {
+    concurrency: 2,
+    recycleEvery: 2,
+    recycleHeapMb: 0,
+    freeMemMb: () => 99999,
+    log: (m) => logs.push(m),
+    newPage: async () => {
+      created++;
+      return newCtxPage();
+    },
+  });
+  assert.ok(r.outcomes.every((o) => o.status === 'guardado'), JSON.stringify(r.outcomes.map((o) => [o.chapter, o.status, o.reason])));
+  assert.ok(created > 1, `se esperaban pestañas reabiertas, creadas=${created}`);
+  assert.ok(logs.some((l) => /reciclada \(cada 2 capítulos\)/.test(l)), 'el log informa del reciclado');
+  for (let i = 1; i <= N; i++) {
+    assert.strictEqual(textOf(path.join(r.siteDir, 'chapters', `${i}.1.html`)), textOf(path.join(rb.siteDir, 'chapters', `${i}.1.html`)), `capítulo ${i}.1 idéntico con y sin reciclado`);
+  }
+  assert.strictEqual(textOf(path.join(r.siteDir, 'index.html')), textOf(path.join(rb.siteDir, 'index.html')));
+  assert.strictEqual((await browser.pages()).length, before, 'no quedan pestañas abiertas');
+});
+
+test('reciclado por heap de JS y por poca RAM libre; recycleEvery 0 lo desactiva', async () => {
+  const N = 6;
+  let c1 = 0;
+  const l1 = [];
+  const r1 = await run(urlsFor(N), outDirFor('rc-heap'), {
+    concurrency: 2, recycleEvery: 0, recycleHeapMb: 1, freeMemMb: () => 99999, log: (m) => l1.push(m),
+    newPage: async () => (c1++, newCtxPage()),
+  });
+  assert.ok(r1.outcomes.every((o) => o.status === 'guardado'));
+  assert.ok(l1.some((l) => /reciclada \(heap de JS/.test(l)), 'recicla por heap');
+  let c2 = 0;
+  const l2 = [];
+  const r2 = await run(urlsFor(N), outDirFor('rc-ram'), {
+    concurrency: 2, recycleEvery: 0, recycleHeapMb: 0, freeMemMb: () => 100, log: (m) => l2.push(m),
+    newPage: async () => (c2++, newCtxPage()),
+  });
+  assert.ok(r2.outcomes.every((o) => o.status === 'guardado'));
+  assert.ok(l2.some((l) => /reciclada \(poca RAM libre/.test(l)), 'recicla por poca RAM');
+  let c3 = 0;
+  const l3 = [];
+  await run(urlsFor(N), outDirFor('rc-off'), {
+    concurrency: 2, recycleEvery: 0, recycleHeapMb: 0, freeMemMb: () => 99999, log: (m) => l3.push(m),
+    newPage: async () => (c3++, newCtxPage()),
+  });
+  assert.strictEqual(c3, 1, 'sin reciclado solo se abre la pestaña extra inicial');
+  assert.ok(!l3.some((l) => /reciclada/.test(l)));
+});
+
+test('reciclado de la pestaña de sesión (una sola pestaña): se vacía sin cerrarla y sigue funcionando', async () => {
+  const page = await newCtxPage();
+  const logs = [];
+  const r = await saveLaunchCourseSite(page, urlsFor(5), 'cid', 'Curso de prueba', outDirFor('rc1'), baseOpts({ concurrency: 1, recycleEvery: 2, recycleHeapMb: 0, freeMemMb: () => 99999, log: (m) => logs.push(m) }));
+  assert.ok(!page.isClosed(), 'la pestaña de la sesión no se cierra');
+  await page.close();
+  assert.ok(r.outcomes.every((o) => o.status === 'guardado'));
+  assert.ok(logs.filter((l) => /reciclada/.test(l)).length >= 2);
+});
+
+test('medios bloqueados por defecto: el navegador no pide el mp4, Node sí lo descarga, el capítulo se guarda completo', async () => {
+  const page = await newCtxPage();
+  await blockUnneededResources(page, MEDIA_PATTERNS);
+  fx.resetHits();
+  const dir = outDirFor('media');
+  const r = await saveLaunchCourseSite(page, urlsFor(2, 'clean=1&heavy=1'), 'cid', 'Curso de prueba', dir, baseOpts({ concurrency: 1 }));
+  await page.close();
+  assert.ok(r.outcomes.every((o) => o.status === 'guardado'), JSON.stringify(r.outcomes.map((o) => [o.chapter, o.status, o.reason])));
+  for (const n of [1, 2]) {
+    const k = `/media/clip${n}.mp4`;
+    assert.strictEqual((fx.hits[k] || 0) - (fx.dl[k] || 0), 0, `${k}: el navegador no debe pedirlo (hits=${fx.hits[k]}, node=${fx.dl[k]})`);
+    assert.ok(textOf(path.join(r.siteDir, 'chapters', `${n}.1.html`)).includes('CONTENIDO-CARGADO-' + n));
+  }
+});
+
+test('planTabs: por defecto min(2, RAM) y aviso cuando N pestañas no caben', () => {
+  const GB = 1024;
+  assert.strictEqual(DEFAULT_TABS, 2);
+  assert.strictEqual(planTabs(undefined, { freeMb: 12 * GB, totalMb: 16 * GB }).tabs, 2);
+  assert.strictEqual(planTabs(undefined, { freeMb: 12 * GB, totalMb: 16 * GB }).warn, undefined);
+  assert.strictEqual(planTabs(undefined, { freeMb: 1 * GB, totalMb: 15 * GB }).tabs, 1, 'poca RAM libre: 1 pestaña');
+  assert.strictEqual(planTabs(undefined, { freeMb: RESERVE_MB + TAB_BUDGET_MB, totalMb: 8 * GB }).tabs, 1);
+  const explicit = planTabs(3, { freeMb: 1 * GB, totalMb: 15 * GB });
+  assert.strictEqual(explicit.tabs, 3, 'un valor explícito se respeta');
+  assert.match(explicit.warn, /Memoria: .*3 pestañas.*--concurrency 1/);
+  assert.strictEqual(planTabs(3, { freeMb: 12 * GB, totalMb: 16 * GB }).warn, undefined);
+  assert.strictEqual(planTabs(1, { freeMb: 500, totalMb: 8 * GB }).warn, undefined);
+  assert.strictEqual(planTabs(99, { freeMb: 64 * GB, totalMb: 64 * GB }).tabs, 6);
+  assert.strictEqual(planTabs(0, { freeMb: 64 * GB, totalMb: 64 * GB }).tabs, 1);
+});

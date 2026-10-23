@@ -27,7 +27,7 @@
 
 - **Uso previsto:** personal y educativo, con tu propia cuenta de Netacad y para cursos en los que estás matriculado. No lo uses para redistribuir material (ver el *Disclaimer* del [README](README.md)).
 - Los cursos nuevos de Netacad ("launch") se guardan como **HTML offline**. Si la URL no es de tipo launch, el programa usa el modo antiguo: **PDF** por capítulo, unidos en un único PDF.
-- Lo que **no** hace: no descarga vídeos (ver [§12](#12-limitaciones-conocidas-y-riesgos)).
+- Lo que **no** garantiza: los vídeos (ver [§12](#12-limitaciones-conocidas-y-riesgos)).
 
 ## 2. Requisitos e instalación
 
@@ -109,14 +109,16 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `<urls…>` | — | URL(s) de los cursos (obligatoria al menos una, salvo con `--validate`). |
 | `--user`, `-u` | — | Correo/usuario de Netacad (obligatorio salvo con `--validate`). |
 | `--password`, `-p` | `.env` → pregunta | Contraseña. |
-| `--concurrency`, `-c N` | HTML: **3** (máx. **6**); PDF: 10 | Capítulos descargados a la vez (pestañas del navegador en paralelo). |
+| `--concurrency`, `-c N` | HTML: **2** automático (baja a 1 con poca RAM libre; máx. **6**); PDF: 10 | Capítulos descargados a la vez (pestañas del navegador en paralelo). Cada pestaña puede usar ~1 GB; con un valor explícito se respeta pero se avisa si no cabe en la RAM libre. |
+| `--recycle-every N` | **8** (`0` = nunca) | Cada `N` capítulos se vacía y se cierra/reabre la pestaña de cada worker para liberar la memoria del renderer de Chrome. También se recicla antes si el heap de JS de la pestaña supera ~600 MB o la RAM libre baja de ~700 MB. La pestaña de la sesión no se cierra: se cambia de proceso (`chrome://version` → `about:blank`). |
+| `--no-block-media` | bloqueo activo | Por defecto el navegador **no carga** vídeo/audio (`.mp4`, `.webm`, `.mp3`, `.m4a`, `.ogv`, `.m3u8`): ocupa memoria y no es necesario, los archivos los baja Node aparte. Con esta opción se cargan como antes. |
 | `--out-dir`, `-o` | `.` (carpeta actual) | Carpeta donde se crea la carpeta del curso. |
 | `--only <cap>` | — | Solo ese capítulo (p. ej. `1.0`). Pensado para depurar/probar. |
 | `--force` | desactivado | Vuelve a descargar todo aunque ya esté guardado y verificado. |
 | `--retry-failed` | desactivado | Descarga solo los capítulos de `descarga-fallos.json`. |
 | `--min-wait ms` | **1500** (500 con `--fast`) | Tiempo mínimo que el contenido debe llevar cargado antes de guardar, *además* de las esperas por condición. |
 | `--chapter-timeout s` | **300** | Segundos máximos por intento de capítulo; al agotarse se reinicia esa pestaña y se reintenta. |
-| `--fast` | desactivado | Modo rápido (opt-in, menos seguro): esperas más cortas y bloquea vídeo/audio y `adobedtm`. |
+| `--fast` | desactivado | Modo rápido (opt-in, menos seguro): esperas más cortas y bloquea también `adobedtm` (el vídeo/audio ya se bloquea por defecto; ver `--no-block-media`). |
 | `--no-block-trackers` | bloqueo activo | No bloquear analítica/publicidad/seguimiento. |
 | `--asset-concurrency N` | **6** | Descargas simultáneas de recursos por capítulo. |
 | `--retries N` | **3** | Reintentos con espera creciente (recursos y capítulos fallidos; los reintentos de capítulo se limitan a 2 extra). |
@@ -129,10 +131,10 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 
 ### 5.2 Ejemplos
 
-**Curso completo (recomendado para empezar, 3 pestañas):**
+**Curso completo (recomendado; 2 pestañas, el valor por defecto):**
 
 ```powershell
-node lib/cli.js --user tu@correo.com --concurrency 3 $URL
+node lib/cli.js --user tu@correo.com --concurrency 2 $URL
 ```
 
 **Guardar en otra carpeta:**
@@ -273,7 +275,8 @@ flowchart TD
 
 - **Verificación posterior y re-captura.** Tras guardar se comprueba el HTML (tamaño, texto, loaders, referencias locales). Si detecta una carga sin terminar, se re-captura **una vez en el sitio con más paciencia**; si no basta, se **recarga la página y se captura otra vez**; si aun así falla, el capítulo queda `parcial` (con la marca `ccna-dl-incomplete`) y se rehace al reanudar.
 - **Caché de assets compartida.** Un mismo recurso (CSS, fuente, imagen) se descarga **una sola vez** aunque lo pidan varios capítulos o pestañas a la vez; hay además un límite global de descargas simultáneas y una caché de cookies de 30 s.
-- **Bloqueo de trackers.** Por defecto se bloquean analítica/publicidad/seguimiento a nivel de red (CDP `Network.setBlockedURLs`). No se bloquea CSS, fuentes, imágenes ni scripts del propio sitio. `--fast` bloquea además vídeo/audio y `adobedtm`.
+- **Bloqueo de trackers y medios.** Por defecto se bloquean analítica/publicidad/seguimiento y vídeo/audio a nivel de red (CDP `Network.setBlockedURLs`). No se bloquea CSS, fuentes, imágenes ni scripts del propio sitio. `--no-block-trackers` y `--no-block-media` desactivan cada bloqueo; `--fast` bloquea además `adobedtm`. Los archivos de vídeo/audio que el HTML referencie los descarga Node (no el navegador).
+- **Memoria (Chrome).** (1) Reciclado de pestañas cada `--recycle-every` capítulos (o antes por heap de JS/poca RAM; se mide con `page.metrics()`): se pasa por `about:blank`, se cierra y se abre una pestaña nueva. (2) Sin vídeo/audio en el navegador. (3) Flags de Chrome (`src/browser-args.ts`): sin BackForwardCache (guardaba páginas anteriores en RAM), caché de disco/medios mínima (los recursos los baja Node; la caché de Chrome solo ocupaba disco en `%TEMP%`), sin extensiones/sync/redes de fondo, `--disable-dev-shm-usage`, `--disable-gpu` (solo headless), `--mute-audio` y tope de heap de JS `--max-old-space-size=1536`. No se usa `--renderer-process-limit` (compartir procesos entre pestañas empeora el aislamiento y las fugas). (4) Pestañas por defecto: 2, o menos si `RAM libre − 1,5 GB` no da para ~1,2 GB por pestaña; con `--concurrency` explícito se avisa si no cabe. (5) Los recursos nunca pasan por la memoria de Node: se escriben a disco en streaming (`.part` → rename), se omiten los que ya existen y los comunes se descargan una sola vez.
 - **Pestañas en segundo plano.** Se emula foco por CDP y se lanzan los flags de Chrome `--disable-background-timer-throttling`, `--disable-backgrounding-occluded-windows` y `--disable-renderer-backgrounding`; si no, las pestañas ocultas pueden bloquearse (`requestAnimationFrame`).
 - **Robustez.** Timeout por capítulo, reinicio de la pestaña si se cuelga/cae, reintentos con espera creciente, y una pestaña extra que recibe "Sesión no válida" antes de terminar ningún capítulo se retira (su capítulo se reencola en la pestaña principal).
 - **Salida determinista.** El índice y el resumen se generan al final en el orden del outline, independientemente de qué pestaña terminó antes.
@@ -293,7 +296,9 @@ flowchart TD
 | `content-probe.ts` | Sondeo del contenido: loaders, vacíos, imágenes pendientes, estabilidad del DOM. |
 | `wait-for-spinners.ts` | Espera a que desaparezcan los `.loading-spinner` (máx. 10 s). |
 | `download-assets.ts` | Descarga de recursos con reintentos, deduplicación, semáforo global y caché de cookies. |
-| `block-resources.ts` | Patrones de bloqueo de trackers y modo agresivo (`--fast`). |
+| `block-resources.ts` | Patrones de bloqueo de trackers, de medios (vídeo/audio) y modo agresivo (`--fast`). |
+| `browser-args.ts` | Flags de Chrome para ahorrar memoria y disco. |
+| `memory.ts` | Reciclado (heap por `page.metrics()`, RAM libre) y plan de pestañas según la RAM libre. |
 | `verify-chapter.ts` | Verificación de un capítulo guardado (formato, texto, loaders, referencias locales, marca de incompleto). |
 | `run-summary.ts` | Lectura/escritura de `descarga-resumen.json` y `descarga-fallos.json`. |
 | `progress.ts` | Barra de progreso (cli-progress) con líneas por capítulo. |
@@ -345,17 +350,20 @@ $env:CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 npm test
 ```
 
-`npm test` = `npm run build` + `node --test --test-timeout=120000 test/unit.test.js test/save.test.js test/parallel.test.js` (cada prueba tiene un límite de 120 s). **No usan Netacad**: levantan un servidor local (`test/fixture-server.js`) que imita un capítulo "launch" (iframe, Shadow DOM, pestañas, esqueleto de carga, imágenes, fuentes, 404, HTML en vez de imagen, etc.).
+`npm test` = `npm run build` + `node --test --test-timeout=600000 test/unit.test.js test/save.test.js test/parallel.test.js` (límite de 600 s por archivo; `parallel.test.js` tarda ~3 min). En un PC justo de RAM, ejecuta los tests con la descarga real parada. **No usan Netacad**: levantan un servidor local (`test/fixture-server.js`) que imita un capítulo "launch" (iframe, Shadow DOM, pestañas, esqueleto de carga, imágenes, fuentes, 404, HTML en vez de imagen, etc.).
 
 | Archivo | Qué cubre |
 |---|---|
 | `test/unit.test.js` | Utilidades (backoff, reintentos, `mapPool`, `waitUntil`, `fmtDuration`), `lowercasePathVariant`, `verifyChapterHtml`, y que el validador no tome `url(%23id)` dentro de `data:` como referencia rota. |
 | `test/save.test.js` | Guardado de un capítulo (assets, reintentos, pestañas), HTML funcional sin red, resumen/fallos, reanudación y `--retry-failed`. |
-| `test/parallel.test.js` | Política de esperas, concurrencia (mismos archivos y mismo orden con 1 y 3 pestañas), caché de assets compartida, esqueleto de 2 s que se espera, re-captura y estado `parcial`, reanudación con paralelismo, timeout y pestaña caída, Ctrl+C, bloqueo de trackers por CDP. |
+| `test/parallel.test.js` | Política de esperas, concurrencia (mismos archivos y mismo orden con 1 y 3 pestañas), caché de assets compartida, esqueleto de 2 s que se espera, re-captura y estado `parcial`, reanudación con paralelismo, timeout y pestaña caída, Ctrl+C, bloqueo de trackers por CDP; **memoria**: reciclado de pestañas (por contador, por heap, por poca RAM, y de la pestaña de sesión) con el mismo resultado que sin reciclar, medios bloqueados en el navegador pero descargados por Node, y `planTabs`. |
+| `test/bench-mem.js`, `test/memwatch.js` | Benchmark de **memoria** (suma del RSS de Chrome y sus hijos; solo procesos propios, Linux). No es un test. |
 | `test/bench.js` | Benchmark local (no es un test). |
 | `test/fixture-server.js` | Servidor local con latencia simulada y efecto de carga. |
 
-Estado actual: **25 pruebas** (11 en `unit`, 3 en `save`, 11 en `parallel`). En el último `npm test` completo pasaron las 24 existentes; la prueba 25 (la del validador, commit `9e6c6fb`) se comprobó por separado.
+Estado actual: **30 pruebas** (11 en `unit`, 3 en `save`, 16 en `parallel`). Las 30 pasaron en la caja de pruebas (Linux) tras el cambio de memoria.
+
+Benchmark de memoria: `node test/bench-mem.js --chapters 30 --scenarios antes:3,ahora:2` (ver [§10.4](#104-memoria-de-chrome-fixture)).
 
 Benchmark (ejemplo): `node test/bench.js --chapters 8 --slow 1500` (con `--old <ruta a lib anterior>` compara contra una compilación previa secuencial; `--scenarios` elige modos; `--latency` fija la latencia simulada, 120 ms por defecto).
 
@@ -394,12 +402,26 @@ Ningún modo guardó capítulos con el esqueleto de carga a medias. La ganancia 
 ### 10.3 Qué NO está verificado
 
 - Descubrimiento del outline **completo** de un curso real (la prueba real usó `--only 1.0`) y descarga real con `--concurrency` ≥ 2.
+- Efecto del reciclado de pestañas y del bloqueo de medios en la memoria de Chrome **con Netacad real**, y que un vídeo bloqueado no deje el capítulo como «incompleto» (se ignoran los spinners `vjs-*` y está probado con el fixture, no con el reproductor real).
 - Si las pestañas extra comparten bien la sesión de Netacad (no comparten `sessionStorage`; hay una salvaguarda, pero no se ha visto en vivo).
 - Que los heurísticos de spinner/esqueleto/contenedor vacío coincidan con las clases reales de Netacad (son suposiciones).
 - El bloqueo de trackers contra Netacad real, y el modo `--fast` en vivo.
 - Comportamiento con ventana visible (`--headful`) en Windows; el efecto de pestañas en segundo plano se comprobó solo en Chrome headless.
 - Tiempos reales: el benchmark es un servidor local, no Netacad.
 - Capítulos con pestañas/carruseles reales: el 1.0 no tiene.
+
+### 10.4 Memoria de Chrome (fixture)
+
+`node test/bench-mem.js --chapters 30 --scenarios antes:3,ahora:2,ahora:3,antes:2` (Linux; suma el RSS del Chrome lanzado por la prueba y sus hijos; el RSS cuenta algo de memoria compartida, así que sirve para **comparar**, no como cifra absoluta). Cada capítulo del fixture lleva 6 imágenes de 2600×2600 px y un vídeo mp4 de 6 MB (`heavy=1`). «Antes» = flags y opciones anteriores (sin reciclado, sin bloqueo de medios); «ahora» = flags nuevos, medios bloqueados y `--recycle-every 6`.
+
+| Escenario | Pico de RAM de Chrome | Peticiones de `.mp4` (navegador + Node) | Resultado |
+|---|---:|---:|---|
+| antes, 3 pestañas (el uso anterior) | 2206 MB | 60 | 30/30 guardados |
+| **ahora, 2 pestañas (nuevo defecto)** | **1771 MB (−20 %)** | 30 (solo Node) | 30/30 guardados |
+| ahora, 3 pestañas | 1941 MB (−12 %) | 30 (solo Node) | 30/30 guardados |
+| antes, 2 pestañas | 2008 MB | 60 | 30/30 guardados |
+
+Lecciones y límites: (a) el fixture **no reproduce** los renderers de 3 GB de Netacad (probablemente por el volumen de JavaScript, iframes y reproductores de las páginas reales), por eso la ganancia aquí es moderada; el efecto real del reciclado en un curso largo **no está medido** en vivo. (b) Se comprobó que `about:blank` por sí solo **no** libera el renderer (1190 MB → 1189 MB), que cerrar la pestaña sí (≈ −260 MB) y que ir a `chrome://version` antes (cambio de proceso) libera otros ≈125 MB en la pestaña de sesión, que no se puede cerrar; `sessionStorage` se conserva tras ese cambio. (c) Con medios bloqueados el navegador no pidió ningún `.mp4`.
 
 ## 11. Solución de problemas
 
@@ -409,7 +431,8 @@ Ningún modo guardó capítulos con el esqueleto de carga a medias. La ganancia 
 | **Capítulos `parcial`** | La carga no terminó ni tras re-capturar. Sube la espera (`--min-wait 2500`, `--chapter-timeout 420`) y relanza: se rehacen. También `--retry-failed`. |
 | **Capturó un spinner / contenido vacío** | Usa el modo seguro (no `--fast`), sube `--min-wait` y rehace ese capítulo: `--only <cap> --force`. El validador lo avisa como "loader/spinner sin ocultar" o "texto sospechoso". |
 | **403/404 de recursos del curso** | Son referencias rotas del propio curso (fuentes `ciscoSansTT`, imágenes de fondo…). Salen como avisos (`guardado con avisos`), no se reintentan y no son un fallo del programa. |
-| **Muchos errores o lentitud al subir `--concurrency`** | Netacad puede limitar peticiones. Baja a 2–3 y no pases de 6 (el programa lo recorta). |
+| **Muchos errores o lentitud al subir `--concurrency`** | Netacad puede limitar peticiones. Baja a 2 y no pases de 6 (el programa lo recorta). |
+| **Chrome usa muchísima RAM / el PC va lento / disco casi lleno** | Cierra la descarga con Ctrl+C (una vez) y relánzala **con el mismo comando** (omite lo verificado). Usa `--concurrency 1` o `2` y, si hace falta, `--recycle-every 4`. Cierra otros programas; si el disco está al límite, libera espacio (Chrome usa una carpeta temporal en `%TEMP%`; con el cambio de memoria su caché ya está limitada a ~50 MB). Para ver el consumo: Administrador de tareas → *Google Chrome for Testing*. Un `Memoria: …` al arrancar indica que la RAM libre no alcanza para las pestañas pedidas. |
 | **El PC se suspende / se corta la conexión** | Evita que el PC entre en reposo durante la descarga. Al volver, relanza el mismo comando: se omiten los capítulos verificados. Los archivos se escriben de forma atómica, así que no quedan capítulos a medias. |
 | **Ctrl+C** | Una vez: termina lo que está en curso y guarda índice/resumen. Dos veces: salida inmediata. Para seguir, el mismo comando. |
 | **`Falta --user`** | Añade `--user tu@correo.com`. |
@@ -423,8 +446,8 @@ Pasos generales de diagnóstico: (1) `--only <cap> --headful` para ver qué pasa
 
 ## 12. Limitaciones conocidas y riesgos
 
-- **Rate-limit / detección.** Netacad podría limitar o bloquear muchas pestañas o peticiones simultáneas. Empieza con `--concurrency 3`; sube con cuidado (máx. 6).
-- **Vídeos.** No se descargan (los vídeos del curso no se guardan; en el HTML quedan los reproductores sin su contenido). Lo mismo con la transcripción interactiva y otros componentes que dependan de servicios externos.
+- **Rate-limit / detección.** Netacad podría limitar o bloquear muchas pestañas o peticiones simultáneas. Empieza con `--concurrency 2` (por defecto); sube con cuidado (máx. 6) y solo si tienes RAM de sobra (~1,2 GB por pestaña).
+- **Vídeos.** No están verificados en una descarga real. Si el HTML trae una URL directa de archivo (`.mp4`, `.webm`…), Node la descarga y el reproductor se sustituye por un `<video>` local; si el reproductor usa *streaming* (blob/`m3u8`), el vídeo no se guarda y queda el reproductor sin contenido. El navegador no carga vídeo/audio (para ahorrar RAM; ver `--no-block-media`). Lo mismo con la transcripción interactiva y otros componentes que dependan de servicios externos.
 - **Selectores de login y de la interfaz.** Dependen del HTML actual de Netacad (por ejemplo `#netacad-login-button`, `input[name="username"]`, `input[name="login"]`, clases del outline). Si Netacad cambia su web, pueden romperse y habrá que adaptar `login.ts` / `get-chapters.ts`. El propio README original avisa de que la herramienta puede quedar desfasada.
 - **Enlaces remotos (`.pka`, `.pdf`, descargas de laboratorio).** Los enlaces a archivos externos (Packet Tracer `.pka`/`.pkt`, PDFs enlazados, `netacad.com/resources/lab-downloads`…) se conservan como **enlaces normales**: sin internet no abren. Solo se guardan los recursos que el capítulo carga directamente.
 - **Recursos que ya fallan en el servidor** (403/404) quedan como referencia remota en el CSS.
@@ -462,6 +485,8 @@ Avisos comunes a todos (esperables): favicon no guardado, fuentes `ciscoSansTT` 
 | `06b2784` | feat: descarga en paralelo con pestañas (`--concurrency`, cola de workers, timeout por capítulo, Ctrl+C seguro, progreso con tiempos) y bloqueo de trackers. |
 | `d53c283` | test: pruebas de paralelismo/esperas/re-captura, benchmark local y documentación de opciones. |
 | `9e6c6fb` | fix(validador): ignorar `url(%23id)` dentro de `data:image/svg+xml` en CSS (falso positivo visto en la prueba real). |
+| `11b511f` | docs: documentación completa. |
+| *(este commit)* | perf(memoria): reciclado de pestañas (`--recycle-every`), medios bloqueados por defecto (`--no-block-media`), flags de Chrome de bajo consumo, pestañas por defecto 2 (automático según RAM libre) y aviso de memoria; el sondeo de carga ignora los spinners internos de `video.js`; pruebas y `test/bench-mem.js`. |
 
 La rama principal `master` está en `2772302` (v1.4.0 original, sin estas mejoras).
 

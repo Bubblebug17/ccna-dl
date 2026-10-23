@@ -26,6 +26,7 @@ import { urlToChapter as urlToChapterId } from './url-to-chapter-id';
 import { backoffMs, fmtDuration, mapPool } from './util/retry';
 import { delay } from './util/promise';
 import { createProgress } from './progress';
+import { DEFAULT_RECYCLE_EVERY, DEFAULT_RECYCLE_HEAP_MB, recycleReason } from './memory';
 
 export type SaveCourseOptions = {
   courseUrl: string;
@@ -54,6 +55,16 @@ export type SaveCourseOptions = {
   progressBar?: boolean;
   /** prepareChapter ya hace el scroll completo (evita repetirlo al guardar). */
   prepareScrolls?: boolean;
+  /**
+   * Recicla (cierra y reabre) la pestaña de cada worker cada N capítulos para que el renderer
+   * no acumule memoria durante toda la descarga. 0 = nunca. Por defecto 8.
+   * La pestaña de la sesión (la primera) no se cierra: se deja en about:blank.
+   */
+  recycleEvery?: number;
+  /** Heap de JS (MB) que dispara un reciclado anticipado de la pestaña. Por defecto 600; 0 = desactivado. */
+  recycleHeapMb?: number;
+  /** Para pruebas: RAM libre (MB) simulada. */
+  freeMemMb?: () => number;
 };
 
 export type SaveCourseResult = {
@@ -102,7 +113,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([p, t]).finally(() => clearTimeout(timer));
 }
 
-type Worker = { id: number; page: Page; own: boolean; retired: boolean; done: number };
+type Worker = { id: number; page: Page; own: boolean; retired: boolean; done: number; since: number };
 
 /** Guarda los capítulos de un curso "launch" como HTML offline. */
 export async function saveLaunchCourseSite(
@@ -190,7 +201,10 @@ export async function saveLaunchCourseSite(
 
   // ---- pestañas de trabajo ----
   const makePage = opts.newPage ?? (() => page.browserContext().newPage());
-  const workers: Worker[] = [{ id: 0, page, own: false, retired: false, done: 0 }];
+  const workers: Worker[] = [{ id: 0, page, own: false, retired: false, done: 0, since: 0 }];
+  const recycleEvery = Math.max(0, Math.floor(opts.recycleEvery ?? DEFAULT_RECYCLE_EVERY));
+  const recycleHeapMb = opts.recycleHeapMb ?? DEFAULT_RECYCLE_HEAP_MB;
+  let recycled = 0;
   const prepareWorkerPage = async (p: Page) => {
     await p.setViewport(VIEWPORT).catch(() => undefined);
     // que la pestaña se comporte como visible/enfocada aunque esté en segundo plano (rAF, temporizadores, carga diferida)
@@ -354,6 +368,41 @@ export async function saveLaunchCourseSite(
     return nextQ < queue.length ? queue[nextQ++] : undefined;
   };
 
+  /**
+   * Libera la memoria del renderer: pestaña propia -> about:blank, cerrar y abrir una nueva;
+   * pestaña de la sesión -> solo about:blank (no se cierra: conserva la sesión).
+   */
+  const recycleTab = async (w: Worker, why: string) => {
+    log(`    · pestaña ${w.id + 1}: reciclada (${why})`);
+    w.since = 0;
+    recycled++;
+    const old = w.page;
+    if (!w.own) {
+      // Pestaña de la sesión: no se cierra. about:blank no libera el renderer (sigue en el mismo proceso);
+      // ir a una página interna (chrome://version) obliga a Chrome a cambiar de proceso y soltar el anterior.
+      await withTimeout(old.goto('chrome://version').catch(() => undefined), 15_000, 'al cambiar de proceso').catch(() => undefined);
+    }
+    await withTimeout(old.goto('about:blank').catch(() => undefined), 15_000, 'al vaciar la pestaña').catch(() => undefined);
+    if (!w.own) return;
+    await old.close().catch(() => undefined);
+    try {
+      w.page = await makePage();
+      await prepareWorkerPage(w.page);
+    } catch (e) {
+      log(`    · pestaña ${w.id + 1}: no se pudo reabrir (${e instanceof Error ? e.message : e}); se retira`);
+      w.retired = true;
+    }
+  };
+
+  const maybeRecycle = async (w: Worker) => {
+    if (w.retired || w.page.isClosed() || opts.signal?.aborted) return;
+    if (nextQ >= queue.length && requeue.length === 0) return; // no quedan capítulos
+    let why: string | null = null;
+    if (recycleEvery > 0 && w.since >= recycleEvery) why = `cada ${recycleEvery} capítulos`;
+    else why = await recycleReason(w.page, recycleHeapMb, opts.freeMemMb).catch(() => null);
+    if (why) await recycleTab(w, why);
+  };
+
   const runWorker = async (w: Worker) => {
     while (!w.retired) {
       const idx = takeNext();
@@ -363,6 +412,8 @@ export async function saveLaunchCourseSite(
       }
       try {
         await processChapter(w, idx);
+        w.since++;
+        await maybeRecycle(w);
       } catch (e) {
         // nunca debe pasar (processChapter captura todo); por seguridad, no perder el capítulo
         const chapter = chapterIdFromUrl(todo[idx]);
@@ -381,7 +432,7 @@ export async function saveLaunchCourseSite(
       try {
         const p = await makePage();
         await prepareWorkerPage(p);
-        workers.push({ id: i, page: p, own: true, retired: false, done: 0 });
+        workers.push({ id: i, page: p, own: true, retired: false, done: 0, since: 0 });
       } catch (e) {
         log(`    · no se pudo abrir la pestaña ${i + 1}: ${e instanceof Error ? e.message : e}`);
         break;
@@ -423,6 +474,7 @@ export async function saveLaunchCourseSite(
   log('════════ Resumen ════════');
   log(`Curso: ${courseTitle}`);
   log(`Capítulos: ${t.total} · guardados ${t.guardado} · omitidos ${t.omitido} · parciales ${t.parcial} · fallidos ${t.fallido}`);
+  if (recycled > 0) log(`Pestañas recicladas: ${recycled} (liberan memoria del navegador)`);
   log(`Duración: ${fmtDuration(wallMs)}` + (workers.length > 1 && sumWorkMs.v > 0 ? ` (${workers.length} pestañas; suma de tiempos por capítulo ${fmtDuration(sumWorkMs.v)}, ganancia ×${(sumWorkMs.v / Math.max(1, wallMs)).toFixed(1)})` : ''));
   if (aborted) {
     log(`Interrumpido: ${pending} capítulo(s) sin procesar. Vuelve a ejecutar el mismo comando para continuar (se omiten los ya guardados).`);

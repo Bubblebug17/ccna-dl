@@ -4,6 +4,43 @@
 // recursos que fallan a propósito. No toca internet.
 const http = require('http');
 
+// PNG de color liso (pocos KB comprimido, pero NxN píxeles al decodificar: ~4·N² bytes en RAM del renderer).
+function bigPng(n, shade) {
+  const zlib = require('zlib');
+  const crcT = Array.from({ length: 256 }, (_, i) => {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (b) => {
+    let c = 0xffffffff;
+    for (const x of b) c = crcT[(c ^ x) & 255] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const t = Buffer.from(type);
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(crc(Buffer.concat([t, data])));
+    return Buffer.concat([len, t, data, c]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(n, 0);
+  ihdr.writeUInt32BE(n, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2; // RGB
+  const row = Buffer.concat([Buffer.from([0]), Buffer.alloc(n * 3, shade)]);
+  const raw = Buffer.alloc(row.length * n);
+  for (let y = 0; y < n; y++) row.copy(raw, y * row.length);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw, { level: 9 })), chunk('IEND', Buffer.alloc(0))]);
+}
+const BIG = new Map();
+const bigImg = (k) => {
+  if (!BIG.has(k)) BIG.set(k, bigPng(2600, (k * 37) % 255));
+  return BIG.get(k);
+};
+
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
   'base64'
@@ -25,6 +62,7 @@ function createFixture(opts = {}) {
   const clean = q.get('clean') === '1';
   const slow = Number(q.get('slow') || 0);
   const sticky = q.get('sticky') === '1';
+  const heavy = q.get('heavy') === '1';
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Capítulo ${n}</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -36,6 +74,7 @@ body{font-family:CS,sans-serif;background:url("data:image/svg+xml;utf8,<svg xmln
 <h1>Capítulo ${n}: contenido</h1>
 <p>${lorem}</p>
 <img id="ok" src="/img/ok.png" alt="ok">
+${heavy ? Array.from({ length: 6 }, (_, k) => `<img class="big" style="width:900px;height:auto;display:block" src="/img/big${(Number(n) * 7 + k) % 40}.png" alt="grande">`).join('') + `<video id="vid" controls preload="auto" width="320" src="/media/clip${n}.mp4"></video>` : ''}
 ${clean ? '' : `<img id="flaky" src="/img/flaky.png" alt="flaky">`}
 ${clean ? '' : `<img id="missing" src="/img/missing.png" alt="missing">`}
 ${clean ? '' : `<img id="down" src="/img/down.png" alt="down">`}
@@ -104,7 +143,7 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
     const lp = path === '/launch' ? url.searchParams : null;
     if (lp) {
       const n = (lp.get('_chapter') || '1.1.1').split('.')[0];
-      const extra = ['slow', 'sticky', 'clean', 'hang'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
+      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
       return send(200, 'text/html', `<!doctype html><html><head><title>Launch ${n}</title></head><body><main id="main-content"><h1>Curso de prueba</h1><iframe src="/authoring-resources/ch${n}.html${extra ? '?' + extra : ''}" style="width:1000px;height:900px;border:0"></iframe></main></body></html>`);
     }
     const m = path.match(/^\/launch(\d+)\.html$/);
@@ -119,6 +158,8 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
     if (path === '/fonts/ciscosanstt-light.woff2') return send(200, 'font/woff2', Buffer.alloc(80, 2));
     if (path === '/fonts/ciscosanstt-thin.woff2') return send(200, 'font/woff2', Buffer.alloc(64, 1)); // solo en minúsculas
     if (path === '/fonts/ciscoSansTT-Thin.woff2') return send(404, 'text/plain', 'nope');
+    if (/^\/img\/big(\d+)\.png$/.test(path)) return send(200, 'image/png', bigImg(Number(path.match(/(\d+)/)[1])));
+    if (/^\/media\/clip\d+\.mp4$/.test(path)) return send(200, 'video/mp4', Buffer.alloc(6 * 1024 * 1024, 3));
     if (path === '/img/ok.png' || /^\/img\/(panel|u)\d+\.png$/.test(path)) return send(200, 'image/png', PNG);
     if (path === '/img/flaky.png') {
       return hits[path] <= 2 ? send(503, 'text/plain', 'busy') : send(200, 'image/png', PNG);
