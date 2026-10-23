@@ -24,6 +24,10 @@ This downloader seems to be broken by now ([#1](/../../issues/1)). I won't fix i
 - Copy the link that leads to the course contents (not the link in the address bar):  
   <img src="./img/copy-link-example.png" width="30%">
 - `npx ccna-dl -u <YOUR_EMAIL> <COURSE_URL>`
+- Only part of the course (no full outline sync, one login): `--only 2` (whole module), `--only 2.3`,
+  `--only 2.1,2.3,5`, `--only 2.1-2.4`. Combine with `--force` to redo just those chapters; the index and
+  `descarga-resumen.json` are merged, the rest of the course is not touched. `--refresh-outline` ignores the
+  cached outline (`outline-cache.json`). Details in [DOCUMENTACION.md](./DOCUMENTACION.md) §5.5.
 
 ## Velocidad, paralelismo y esperas (modo HTML offline)
 

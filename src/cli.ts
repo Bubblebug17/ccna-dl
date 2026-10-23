@@ -33,7 +33,16 @@ import {
   restoreLaunchCurriculumPage,
   waitForChapterContent,
 } from './wait-for-chapter-content';
-import { saveLaunchCourseSite } from './save-course';
+import { saveLaunchCourseSite, courseSiteDir, chapterIdFromUrl } from './save-course';
+import { OnlySpec, parseOnly, wholeModulesOfOnly } from './only-spec';
+import {
+  OUTLINE_CACHE_FILE,
+  chaptersFromCache,
+  entriesFromUrls,
+  mergeOutlineCache,
+  readOutlineCache,
+  writeOutlineCache,
+} from './outline-cache';
 import { setWaitPolicy } from './wait-policy';
 import {
   AGGRESSIVE_PATTERNS,
@@ -46,7 +55,7 @@ import { DEFAULT_RECYCLE_EVERY, DEFAULT_TABS, planTabs } from './memory';
 import { DEFAULT_ASSET_OPTIONS } from './download-assets';
 import sanitize = require('sanitize-filename');
 import { login } from './login';
-import { getChapterUrls } from './get-chapters';
+import { buildLaunchUrl, getChapterUrls } from './get-chapters';
 import { urlToChapter as urlToChapterId } from './url-to-chapter-id';
 import { solveQuizzes } from './solve-quizzes';
 
@@ -109,7 +118,14 @@ const cmd = command({
       long: 'only',
       type: optional(string),
       description:
-        'Only download the chapter with this number (e.g. "1.0"). For debugging.',
+        'Descarga solo parte del curso SIN sincronizar el curso entero (solo se lee el outline de esos módulos; una sola sesión). ' +
+        'Acepta un capítulo (--only 2.3), un módulo entero (--only 2), varios separados por coma (--only 2.1,2.3,5) y rangos (--only 2.1-2.4, --only 2-4). ' +
+        'El índice y el resumen se mezclan con lo ya existente (el resto del curso no se toca). Combínalo con --force para rehacer solo lo pedido.',
+    }),
+    refreshOutline: flag({
+      long: 'refresh-outline',
+      description:
+        'Con --only: ignora outline-cache.json y vuelve a leer el outline del curso (por defecto, si la caché del curso ya tiene lo pedido, no se escanea).',
     }),
     validate: flag({
       long: 'validate',
@@ -230,6 +246,17 @@ const cmd = command({
       console.log('');
     }
 
+    let onlySpec: OnlySpec | undefined;
+    if (args.only) {
+      try {
+        onlySpec = parseOnly(args.only);
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
+        process.exitCode = 2;
+        return;
+      }
+    }
+
     const waitPolicy = setWaitPolicy({
       fast: args.fast,
       minWaitMs: args.minWait,
@@ -319,17 +346,58 @@ const cmd = command({
           courseTitle = await getCourseTitle(sessionPage);
           console.log('Course Title: ' + courseTitle);
           if (args.screenshot) await sessionPage.screenshot({ path: 'course.png' });
-          urls = await getChapterUrls(sessionPage, { only: args.only });
+          const isLaunchUrl = /\/launch\b/.test(url);
+          const courseIdEarly =
+            (() => {
+              try {
+                return new URL(url).searchParams.get('id') ?? undefined;
+              } catch {
+                return undefined;
+              }
+            })() ?? url.match(/[0-9]+/)?.at(0);
+          const siteDir = courseIdEarly ? courseSiteDir(args.outDir, courseIdEarly, courseTitle) : undefined;
+
+          let fromCache = false;
+          urls = [];
+          if (onlySpec && isLaunchUrl && courseIdEarly && siteDir && !args.refreshOutline) {
+            const cache = await readOutlineCache(siteDir, courseIdEarly);
+            const hit = chaptersFromCache(cache, onlySpec);
+            if (cache && hit) {
+              const base = sessionPage.url();
+              urls = hit.map((e) => buildLaunchUrl(base, e.viewId, e.chapter));
+              fromCache = true;
+              console.log(
+                `--only ${onlySpec.text}: ${urls.length} capítulo(s) tomados de ${OUTLINE_CACHE_FILE} (${cache.savedAt.slice(0, 10)}); no se escanea el outline. Usa --refresh-outline para volver a leerlo.`
+              );
+            }
+          }
+          if (!fromCache) {
+            const tScan = Date.now();
+            urls = await getChapterUrls(sessionPage, { only: args.only });
+            if (!args.only) console.log(`Outline completo leído en ${((Date.now() - tScan) / 1000).toFixed(0)} s.`);
+            if (isLaunchUrl && courseIdEarly && siteDir && urls.length > 0) {
+              try {
+                const prev = await readOutlineCache(siteDir, courseIdEarly);
+                const found = entriesFromUrls(urls);
+                const present = new Set(found.map((e) => Number(e.chapter.split('.')[0])));
+                const cacheNow = mergeOutlineCache(prev, courseIdEarly, found, {
+                  fullScan: !onlySpec,
+                  wholeModules: onlySpec ? wholeModulesOfOnly(onlySpec).filter((m) => present.has(m)) : [],
+                });
+                await writeOutlineCache(siteDir, cacheNow);
+              } catch (e) {
+                console.warn(`No se pudo guardar ${OUTLINE_CACHE_FILE}: ${e instanceof Error ? e.message : e}`);
+              }
+            }
+          }
           if (args.only) {
-            console.log(
-              `Capítulo solicitado: ${args.only} → ${urls.length} URL(s)`
-            );
+            console.log(`--only ${args.only} → ${urls.length} capítulo(s): ${urls.map((u) => chapterIdFromUrl(u)).join(', ') || '(ninguno)'}`);
           }
 
           if (urls.length === 0) {
             console.error(
               args.only
-                ? `No se encontró el capítulo "${args.only}" en el outline.`
+                ? `No se encontró ningún capítulo para --only "${args.only}" en el outline.`
                 : 'No hay URLs de capítulo para descargar.'
             );
             await sessionPage.close();
@@ -388,6 +456,7 @@ const cmd = command({
               courseUrl: url,
               resume: !args.force,
               retryFailed: args.retryFailed,
+              partial: !!args.only,
               retries: Math.max(0, Math.floor(args.retries)),
               concurrency: tabs,
               recycleEvery: Math.max(0, Math.floor(args.recycleEvery)),

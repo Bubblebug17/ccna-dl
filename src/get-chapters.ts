@@ -2,6 +2,7 @@ import { HTTPResponse, Page } from 'puppeteer';
 import * as cliProgress from 'cli-progress';
 import { urlToChapter } from './url-to-chapter-id';
 import { dropShadowedSubchapters } from './chapter-ids';
+import { describeOnly, explicitChaptersOfOnly, matchesOnly, modulesOfOnly, OnlySpec, parseOnly } from './only-spec';
 import { waitForSpinners } from './wait-for-spinners';
 import { delay } from './util/promise';
 import { restoreLaunchCurriculumPage } from './wait-for-chapter-content';
@@ -56,7 +57,10 @@ class OutlineScanProgress {
 }
 
 export type GetChapterOptions = {
-  /** Solo resolver este capítulo (p. ej. "12.1") con escaneo reducido. */
+  /**
+   * Solo resolver estos capítulos con escaneo reducido (solo se leen los módulos implicados).
+   * Expresión de --only: "2.3", "2" (módulo), "2.1,2.3,5", "2.1-2.4" (ver only-spec.ts).
+   */
   only?: string;
 };
 
@@ -67,11 +71,18 @@ export async function getChapterUrls(
   if (isLaunchPage(page.url())) {
     console.log('Getting Launch Chapter URLs');
     if (options?.only) {
-      console.log(`Modo capítulo único: ${options.only}`);
+      console.log(`Modo --only: ${describeOnly(parseOnly(options.only))} (se lee solo el outline de esos módulos).`);
     }
     return getLaunchChapterUrls(page, options);
   }
-  return getLegacyChapterUrls(page);
+  const legacy = await getLegacyChapterUrls(page);
+  if (!options?.only) return legacy;
+  // curso clásico: no hay escaneo que ahorrar, solo se filtra la lista (2.3 ≡ 2.3.1)
+  const spec = parseOnly(options.only);
+  return legacy.filter((u) => {
+    const c = urlToChapter(u);
+    return matchesOnly(spec, c) || matchesOnly(spec, c.replace(/\.1$/, ''));
+  });
 }
 
 function isLaunchPage(url: string): boolean {
@@ -89,7 +100,7 @@ function compareChapter(a: string, b: string): number {
   return 0;
 }
 
-function buildLaunchUrl(
+export function buildLaunchUrl(
   pageUrl: string,
   viewId: string,
   chapter: string
@@ -229,8 +240,7 @@ async function getLaunchChapterUrls(
   page: Page,
   options?: GetChapterOptions
 ): Promise<string[]> {
-  const onlyChapter = options?.only;
-  const fastScan = !!onlyChapter;
+  if (options?.only) return getLaunchChapterUrlsOnly(page, parseOnly(options.only));
   const fromNetwork = new Map<string, string>();
   const jsonBodies: unknown[] = [];
 
@@ -276,16 +286,7 @@ async function getLaunchChapterUrls(
 
     let fromReact: ChapterEntry[] = [];
 
-    if (fastScan) {
-      progress.set(12, `Módulo ${onlyChapter!.split('.')[0]}…`);
-      await expandModuleForChapter(page, onlyChapter!);
-      await extractViewsFromPageHtml(page, fromNetwork);
-      fromReact = await collectViewsFromReactOutline(page);
-      progress.set(18, `React: ${fromReact.length} capítulos`);
-      for (const { viewId, chapter } of fromReact) {
-        fromNetwork.set(viewId, chapter);
-      }
-    } else {
+    {
       progress.set(10, 'Expandiendo módulos…');
       await expandOutlineModules(page, (round, max, clicks) => {
         progress.set(
@@ -335,7 +336,7 @@ async function getLaunchChapterUrls(
     let fromOutline = await collectViewsFromOutlineTree(page);
     progress.set(64, `Outline: ${fromOutline.length} capítulos`);
 
-    if (!fastScan) {
+    {
       progress.set(66, 'Segunda pasada del outline…');
       await exploreOutlineSidebar(page, (pass, step, total) => {
         const base = 66 + pass * 8;
@@ -368,24 +369,18 @@ async function getLaunchChapterUrls(
     );
     const haveChapters = new Set(entries.map((e) => e.chapter));
     const outlineLabels = await listOutlineChapterLabels(page);
-    let missing = outlineLabels.filter((ch) => !haveChapters.has(ch));
-
-    if (onlyChapter && !haveChapters.has(onlyChapter)) {
-      missing = [onlyChapter];
-    } else if (onlyChapter) {
-      missing = [];
-    }
+    const missing = outlineLabels.filter((ch) => !haveChapters.has(ch));
 
     if (missing.length > 0) {
       progress.set(84, `Resolviendo ${missing.length} capítulo(s)…`);
       const startUrl = page.url();
       const fromResolved = await collectViewsForMissingChapters(
         page,
-        onlyChapter ? [onlyChapter] : missing,
+        missing,
         startUrl,
         fromNetwork
       );
-      if (fromResolved.length < missing.length && !onlyChapter) {
+      if (fromResolved.length < missing.length) {
         console.warn(
           `  · ${missing.length - fromResolved.length} capítulo(s) sin view ID tras resolución: ` +
             `${missing
@@ -397,9 +392,6 @@ async function getLaunchChapterUrls(
       entries = mergeChapterEntries(entries, fromResolved);
     }
 
-    if (onlyChapter) {
-      entries = entries.filter((e) => e.chapter === onlyChapter);
-    }
     progress.set(100, `Total: ${entries.length} capítulos`);
     progress.stop();
 
@@ -434,6 +426,145 @@ async function getLaunchChapterUrls(
     progress.stop();
     page.off('response', onResponse);
   }
+}
+
+/**
+ * --only: lee SOLO el outline de los módulos implicados (no recorre todo el curso).
+ * Frente al escaneo completo se omiten: expandir todos los módulos, el barrido de scroll del sidebar
+ * (2 pasadas), las segundas lecturas de enlaces/DOM/árbol y el listado global de etiquetas. Los
+ * recolectores "de reserva" (enlaces, DOM, árbol, API) solo se usan si falta algún capítulo pedido.
+ */
+async function getLaunchChapterUrlsOnly(
+  page: Page,
+  spec: OnlySpec
+): Promise<string[]> {
+  const t0 = Date.now();
+  const fromNetwork = new Map<string, string>();
+  const jsonBodies: unknown[] = [];
+
+  const onResponse = async (response: HTTPResponse) => {
+    try {
+      if (!response.ok() || response.status() === 204) return;
+      const type = response.headers()['content-type'] ?? '';
+      if (!type.includes('json')) return;
+      if (!response.url().includes('netacad.com')) return;
+      const method = response.request().method();
+      if (method !== 'GET' && method !== 'POST') return;
+      const json = await response.json();
+      jsonBodies.push(json);
+      extractChapterViews(json, fromNetwork);
+    } catch {
+      // cuerpo no disponible
+    }
+  };
+
+  page.on('response', onResponse);
+  const progress = new OutlineScanProgress();
+  progress.start('Capítulos');
+  try {
+    progress.set(2, 'Cargando curriculum…');
+    await ensureCurriculumTab(page);
+    const curriculumUrl = new URL(page.url());
+    curriculumUrl.searchParams.set('tab', 'curriculum');
+    await page.goto(curriculumUrl.toString(), { waitUntil: 'networkidle2', timeout: 120_000 });
+    await waitForSpinners(page).catch(() => undefined);
+    await waitForCourseOutline(page);
+    await injectOutlineHelpers(page);
+    await delay(800);
+
+    const mods = modulesOfOnly(spec);
+    progress.set(15, `Módulo(s) ${mods.join(', ')}…`);
+    await expandModulesByNumber(page, mods);
+    await extractViewsFromPageHtml(page, fromNetwork);
+    for (const body of jsonBodies) extractChapterViews(body, fromNetwork);
+    let fromReact = await collectViewsFromReactOutline(page);
+    for (const { viewId, chapter } of fromReact) fromNetwork.set(viewId, chapter);
+
+    const wanted = new Set<string>([
+      ...(await listOutlineChapterLabels(page)).filter((c) => matchesOnly(spec, c)),
+      ...explicitChaptersOfOnly(spec),
+    ]);
+    const pick = (...sources: ChapterEntry[][]) =>
+      mergeChapterEntries(...sources).filter((e) => matchesOnly(spec, e.chapter));
+
+    let entries = pick(entriesFromMap(fromNetwork), fromReact);
+    let missing = [...wanted].filter((c) => !entries.some((e) => e.chapter === c));
+    progress.set(60, `${entries.length}/${wanted.size} capítulos resueltos`);
+
+    if (missing.length > 0) {
+      // reserva: otras fuentes del propio outline ya cargado (en página) y la API
+      progress.set(70, `Buscando ${missing.length} capítulo(s) más…`);
+      await refetchCurriculumFromNetwork(page, fromNetwork);
+      for (const body of jsonBodies) extractChapterViews(body, fromNetwork);
+      const fromLinks = await collectViewsFromPageLinks(page);
+      const fromDom = await collectViewsFromDom(page);
+      const fromTree = await collectViewsFromOutlineTree(page);
+      fromReact = mergeChapterEntries(fromReact, await collectViewsFromReactOutline(page));
+      entries = pick(entriesFromMap(fromNetwork), fromLinks, fromDom, fromTree, fromReact);
+      missing = [...wanted].filter((c) => !entries.some((e) => e.chapter === c));
+    }
+    if (missing.length > 0) {
+      progress.set(85, `Resolviendo ${missing.length} capítulo(s)…`);
+      const resolved = await collectViewsForMissingChapters(page, missing, page.url(), fromNetwork);
+      entries = pick(entries, resolved);
+      missing = [...wanted].filter((c) => !entries.some((e) => e.chapter === c));
+    }
+
+    progress.set(100, `Total: ${entries.length} capítulos`);
+    progress.stop();
+
+    const explicit = new Set(explicitChaptersOfOnly(spec));
+    for (const c of missing) {
+      console.warn(
+        explicit.has(c)
+          ? `  ⚠ El capítulo ${c} no existe en el outline (o no se pudo resolver); se continúa con los demás.`
+          : `  ⚠ No se pudo resolver el capítulo ${c} del outline; se continúa con los demás.`
+      );
+    }
+    if (entries.length === 0) {
+      console.warn(`  ⚠ --only ${spec.text}: no se encontró ningún capítulo en el outline.`);
+      await restoreLaunchCurriculumPage(page, page.url());
+      return [];
+    }
+
+    const shadow = dropShadowedSubchapters(entries);
+    if (shadow.dropped.length) {
+      console.warn(
+        `  · ${shadow.dropped.length} elemento(s) del outline ignorados por ser sub-elementos de una sección existente: ` +
+          shadow.dropped.map((e) => e.chapter).join(', ')
+      );
+      entries = shadow.kept;
+    }
+
+    const baseUrl = page.url();
+    const urls = entries
+      .sort((a, b) => compareChapter(a.chapter, b.chapter))
+      .map((entry) => buildLaunchUrl(baseUrl, entry.viewId, entry.chapter));
+    await restoreLaunchCurriculumPage(page, baseUrl);
+    console.log(
+      `Encontrados ${urls.length} capítulo(s) pedidos (${describeOnly(spec)}) en ${((Date.now() - t0) / 1000).toFixed(1)} s, leyendo solo el módulo ${mods.join(', ')} del outline.`
+    );
+    return urls;
+  } finally {
+    progress.stop();
+    page.off('response', onResponse);
+  }
+}
+
+/** Expande solo los módulos indicados (por número) y espera una sola vez. */
+async function expandModulesByNumber(page: Page, mods: number[]): Promise<void> {
+  for (const mod of mods) {
+    await page.evaluate((m) => {
+      const root = document.querySelector('#course-outline');
+      if (!root) return;
+      const btn = Array.from(root.querySelectorAll('button')).find((b) => {
+        const t = (b as HTMLElement).innerText.trim();
+        return new RegExp(`^M[óo]dulo ${m}[:\\.]`, 'i').test(t) || new RegExp(`^Module ${m}[:\\.]`, 'i').test(t);
+      });
+      if (btn && btn.getAttribute('aria-expanded') === 'false') (btn as HTMLElement).click();
+    }, mod);
+  }
+  await delay(500);
 }
 
 function entriesFromMap(found: Map<string, string>): ChapterEntry[] {

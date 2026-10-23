@@ -114,7 +114,8 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--block-media` | desactivado | Opcional: el navegador no carga vídeo/audio (`.mp4`, `.webm`, `.mp3`, `.m4a`, `.ogv`) para ahorrar memoria. **Por defecto se cargan**, porque el reproductor debe arrancar para poder capturar y descargar el vídeo (§7.5). Combinarlo con vídeos activos puede dejarlos sin descargar. |
 | `--no-videos` | desactivado | No activa los reproductores ni descarga vídeos (se queda el póster, como antes de la v. 3 del formato). Esos capítulos se guardan con formato 2 y la reanudación no los rehace por vídeos pendientes. |
 | `--out-dir`, `-o` | `.` (carpeta actual) | Carpeta donde se crea la carpeta del curso. |
-| `--only <cap>` | — | Solo ese capítulo (p. ej. `1.0`). Pensado para depurar/probar. |
+| `--only <expr>` | — | Descarga solo una parte del curso **sin sincronizar el curso entero** (§5.5). Acepta un capítulo (`--only 2.3`), un módulo entero (`--only 2`, incluye 2.0, 2.1…), una lista (`--only 2.1,2.3,5`) y rangos (`--only 2.1-2.4`, `--only 2-4`). |
+| `--refresh-outline` | desactivado | Con `--only`: ignora `outline-cache.json` y vuelve a leer el outline (§5.5). |
 | `--force` | desactivado | Vuelve a descargar todo aunque ya esté guardado y verificado. |
 | `--retry-failed` | desactivado | Descarga solo los capítulos de `descarga-fallos.json`. |
 | `--min-wait ms` | **1500** (500 con `--fast`) | Tiempo mínimo que el contenido debe llevar cargado antes de guardar, *además* de las esperas por condición. |
@@ -194,6 +195,22 @@ node lib/cli.js -u tu@correo.com --asset-concurrency 4 --retries 5 $URL       # 
 node lib/cli.js -u tu@correo.com --format a4 --concurrency 5 "<url-de-curso-antiguo>"
 ```
 
+### 5.5 `--only`: descargar solo parte del curso
+
+```powershell
+node lib/cli.js -u tu@correo.com --only 2 --force $URL          # módulo 2 entero (2.0, 2.1, 2.2…)
+node lib/cli.js -u tu@correo.com --only 2.1,2.3 $URL            # dos capítulos
+node lib/cli.js -u tu@correo.com --only 2.1-2.4 $URL            # rango
+```
+
+Una sola ejecución (un solo login) basta para varios capítulos o módulos: no hace falta un bucle de PowerShell con un `--only` por capítulo.
+
+- **Escaneo reducido:** solo se expanden y leen los módulos implicados; los view ID se resuelven únicamente para los capítulos pedidos (no se recorre el sidebar entero ni se hacen las pasadas de reserva salvo que falte alguno). Un capítulo pedido que no existe se avisa (`⚠`) y se continúa con los demás.
+- **Caché del outline:** tras leer el outline se guarda `<curso>/outline-cache.json` (solo capítulo → view ID, con fecha; sin credenciales ni cookies). Si una ejecución posterior con `--only` pide algo que la caché ya tiene (módulos leídos enteros o capítulos explícitos conocidos, con menos de 30 días), **no se escanea el outline**. `--refresh-outline` la ignora y la rehace; si un capítulo falla con "no se pudo abrir", úsalo (los view ID podrían haber cambiado). Aun con caché hay login y apertura del curso.
+- **No se toca el resto del curso:** `index.html` y `descarga-resumen.json` se **mezclan** con lo existente (solo cambian las entradas tocadas; los demás capítulos no pasan a faltantes ni fallidos; el resumen lleva `"partial": true`). No se borra ningún capítulo.
+- **Qué se rehace:** `--only` + `--force` rehace solo lo pedido. Sin `--force` se aplica la regla normal de reanudación: se omite lo ya verificado (un capítulo de formato 3 con vídeos pendientes se rehace) y se conserva su resultado anterior en el resumen.
+- Una expresión inválida (`--only x`, `4-2`) termina con código 2 antes de abrir el navegador.
+
 ### 5.3 Qué verás en consola
 
 - Mensajes de login, título del curso y número de capítulos encontrados.
@@ -224,7 +241,8 @@ Dentro de `--out-dir` se crea una carpeta por curso, llamada `<id-del-curso>_<t�
     │   ├── img/                   # imágenes
     │   ├── video/                 # vídeos (.mp4) y pósters
     │   └── files/                 # otros archivos (PDF, ZIP, …)
-    ├── descarga-resumen.json      # resultado de la última ejecución
+    ├── descarga-resumen.json      # resultado de la última ejecución (con --only se mezcla con el anterior)
+    ├── outline-cache.json         # capítulo → view ID (caché para --only)
     └── descarga-fallos.json       # capítulos pendientes de reintentar
 ```
 
@@ -290,7 +308,9 @@ flowchart TD
 |---|---|
 | `cli.ts` | Punto de entrada (cmd-ts): opciones, login, descubrimiento, elección HTML/PDF, Ctrl+C, bloqueo de recursos, `--validate`. |
 | `login.ts` | Inicio de sesión: escribe el usuario, avanza, introduce la contraseña y gestiona el banner de cookies y la página de privacidad de Cisco. |
-| `get-chapters.ts` | Lee el outline del curso y devuelve las URLs de capítulo (soporta `--only`). |
+| `get-chapters.ts` | Lee el outline del curso y devuelve las URLs de capítulo (con `--only`, escaneo reducido a los módulos pedidos). |
+| `only-spec.ts` | Parser de la expresión `--only` (capítulo, módulo, lista, rango) y su filtro. |
+| `outline-cache.ts` | `outline-cache.json`: caché capítulo → view ID del outline (con fecha, 30 días) para `--only`. |
 | `save-course.ts` | Orquesta el guardado: reanudar, cola, pool de pestañas, timeouts, reintentos, abortar, índice y resumen. |
 | `save-chapter-html.ts` | Captura y serializa un capítulo (DOM, Shadow DOM, pestañas), reescribe assets, escribe el HTML atómicamente, construye `index.html`. |
 | `wait-for-chapter-content.ts` | Navegación al capítulo, esperas de contenido, scroll y utilidades de la vista "launch". |
@@ -328,7 +348,7 @@ También: `scripts/validate-download.js` (validador offline), `scripts/clean-fak
 4. Node descarga el vídeo: un mp4 directo (también con URL firmada sin extensión) con `fetch`; un manifiesto `.m3u8`/`.mpd` con **ffmpeg** (`ffmpeg-download.ts`; hay que tenerlo instalado o definir `FFMPEG_PATH`; sin él, el capítulo sale con ese recurso fallido y el mensaje «ffmpeg no está instalado»). El `.mp4` se escribe como `.part` y se renombra al terminar; el tiempo límite es 15 veces el de un recurso normal.
 5. Reescribe las referencias a rutas locales (`../assets/video/…mp4`, póster). Los `.vtt` se **incrustan** en el HTML como `data:text/vtt;base64` porque Chrome bloquea `<track src>` en `file://` por CORS.
 
-Formato de capítulo: `ccna-dl-format` pasa a **3** (con vídeos) o **2** (con `--no-videos`). Al reanudar, un capítulo de formato 2 solo se rehace si tiene reproductores pendientes (póster sin `<video>`); no se rehacen los 100 capítulos que no tienen vídeo. `--force` o `--only X.Y` fuerzan la descarga.
+Formato de capítulo: `ccna-dl-format` pasa a **3** (con vídeos) o **2** (con `--no-videos`). Al reanudar, un capítulo de formato 2 solo se rehace si tiene reproductores pendientes (póster sin `<video>`); no se rehacen los 100 capítulos que no tienen vídeo. `--force` fuerza la descarga (con `--only`, solo de lo pedido).
 
 Avisos de uso: pulsar «play» puede contar el vídeo como visto en tu progreso de Netacad (se pausa al instante); las URLs firmadas caducan, por eso se descarga justo después de capturar; los vídeos dentro de pestañas ocultas (panel no activo) no se activan; un reproductor que nunca monta cuesta ~9 s de espera.
 
@@ -395,12 +415,13 @@ npm test
 | `test/subtopics.test.js` | Subtemas falsos (IP/redes), `dropShadowedSubchapters`/`dedupeByFileId`, filtro al leer capítulos y al construir el índice, `bogusSubtopic` del validador y `scripts/clean-fake-chapters.js` (simulación no modifica; `--apply` respalda, limpia y aparta). |
 | `test/video.test.js` | Vídeos con el servidor fixture + puppeteer (necesita ffmpeg para generar el vídeo): reproductor diferido con URL firmada mp4 y HLS (vía ffmpeg), reescritura a rutas locales, `.vtt` incrustado, apertura por `file://` (`readyState`, `duration`, pistas, sin peticiones externas), `video=none` → aviso y pendiente, `--no-videos`, formato 3 y reanudación. |
 | `test/save.test.js` | Guardado de un capítulo (assets, reintentos, pestañas), HTML funcional sin red, resumen/fallos, reanudación y `--retry-failed`. |
+| `test/only.test.js` | `--only`: parser (capítulo, módulo, lista, rango, errores), caché del outline (cuándo contesta, mezcla, caducidad, archivo corrupto), mezcla del resumen y ejecución parcial sobre el fixture (no se pierden otros capítulos ni en `index.html` ni en `descarga-resumen.json`). |
 | `test/parallel.test.js` | Política de esperas, concurrencia (mismos archivos y mismo orden con 1 y 3 pestañas), caché de assets compartida, esqueleto de 2 s que se espera, re-captura y estado `parcial`, reanudación con paralelismo, timeout y pestaña caída, Ctrl+C, bloqueo de trackers por CDP; **memoria**: reciclado de pestañas (por contador, por heap, por poca RAM, y de la pestaña de sesión) con el mismo resultado que sin reciclar, con `--block-media` los medios se bloquean en el navegador pero los descarga Node, y `planTabs`. |
 | `test/bench-mem.js`, `test/memwatch.js` | Benchmark de **memoria** (suma del RSS de Chrome y sus hijos; solo procesos propios, Linux). No es un test. |
 | `test/bench.js` | Benchmark local (no es un test). |
 | `test/fixture-server.js` | Servidor local con latencia simulada y efecto de carga. |
 
-Estado actual: **50 pruebas** (11 en `unit`, 10 en `subtopics`, 3 en `save`, 10 en `video`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
+Estado actual: **55 pruebas** (11 en `unit`, 10 en `subtopics`, 3 en `save`, 5 en `only`, 10 en `video`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
 
 Benchmark de memoria: `node test/bench-mem.js --chapters 30 --scenarios antes:3,ahora:2` (ver [§10.4](#104-memoria-de-chrome-fixture)).
 
@@ -530,7 +551,8 @@ Avisos comunes a todos (esperables): favicon no guardado, fuentes `ciscoSansTT` 
 | `9e6c6fb` | fix(validador): ignorar `url(%23id)` dentro de `data:image/svg+xml` en CSS (falso positivo visto en la prueba real). |
 | `11b511f` | docs: documentación completa. |
 | `80c83fb` | perf(memoria): reciclado de pestañas (`--recycle-every`), medios bloqueados por defecto (`--no-block-media`; sustituido después por `--block-media` opcional), flags de Chrome de bajo consumo, pestañas por defecto 2 (automático según RAM libre) y aviso de memoria; el sondeo de carga ignora los spinners internos de `video.js`; pruebas y `test/bench-mem.js`. |
-| *(este commit)* | fix: capítulos/subtemas inexistentes (IP tomadas por subtemas, cuestionario `X.Y.1` que pisaba la sección `X.Y`), filtros en detección/índice/validador, `scripts/clean-fake-chapters.js`; feat: vídeos reproducibles offline (activar el reproductor, mp4/HLS con ffmpeg, póster y `.vtt` incrustado, formato 3); el bloqueo de medios pasa a ser opcional (`--block-media`, se quita `--no-block-media`) y se añade `--no-videos`; pruebas `subtopics` y `video`. |
+| *(commit `--only`)* | feat: `--only` acepta capítulo, módulo, lista y rango con escaneo reducido a los módulos pedidos; `outline-cache.json` y `--refresh-outline`; el resumen y el índice se mezclan en ejecuciones parciales (antes `descarga-resumen.json` se sobrescribía solo con lo de la ejecución); pruebas `only`. |
+| *(commit anterior)* | fix: capítulos/subtemas inexistentes (IP tomadas por subtemas, cuestionario `X.Y.1` que pisaba la sección `X.Y`), filtros en detección/índice/validador, `scripts/clean-fake-chapters.js`; feat: vídeos reproducibles offline (activar el reproductor, mp4/HLS con ffmpeg, póster y `.vtt` incrustado, formato 3); el bloqueo de medios pasa a ser opcional (`--block-media`, se quita `--no-block-media`) y se añade `--no-videos`; pruebas `subtopics` y `video`. |
 
 La rama principal `master` está en `2772302` (v1.4.0 original, sin estas mejoras).
 

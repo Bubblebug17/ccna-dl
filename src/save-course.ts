@@ -35,6 +35,11 @@ export type SaveCourseOptions = {
   resume: boolean;
   /** Solo los capítulos de descarga-fallos.json. */
   retryFailed: boolean;
+  /**
+   * Ejecución parcial (--only): `urls` es solo una parte del curso. El resumen se MEZCLA con el existente
+   * (no se pierde el resto) y el índice se completa con lo que ya hay en disco (siempre es así).
+   */
+  partial?: boolean;
   /** Reintentos de capítulo (recargando la página) y de recursos. */
   retries: number;
   assetOpts: AssetOptions;
@@ -80,6 +85,11 @@ export type SaveCourseResult = {
   /** Capítulos sin procesar por la interrupción. */
   pending?: number;
 };
+
+/** Carpeta del curso (misma regla que usa saveLaunchCourseSite). */
+export function courseSiteDir(outDir: string, courseId: string, courseTitle: string): string {
+  return join(outDir, sanitize(`${courseId}_${courseTitle}`) || courseId);
+}
 
 export function chapterIdFromUrl(url: string): string {
   return urlToChapterId(url).replace(/\.1$/, '');
@@ -130,8 +140,7 @@ export async function saveLaunchCourseSite(
   const startedAt = new Date();
   const t0 = Date.now();
 
-  const folderName = sanitize(`${courseId}_${courseTitle}`) || courseId;
-  const siteDir = join(outDir, folderName);
+  const siteDir = courseSiteDir(outDir, courseId, courseTitle);
   const chaptersDir = join(siteDir, 'chapters');
   await mkdir(chaptersDir, { recursive: true });
   await page.setViewport(VIEWPORT);
@@ -484,8 +493,9 @@ export async function saveLaunchCourseSite(
 
   // ---- resumen + lista de fallos reintentables ----
   const failures = mergeFailures(previous, processed.filter((o) => o.status !== 'omitido'));
-  const files = await writeRunFiles(siteDir, info, processed, failures, startedAt);
+  const files = await writeRunFiles(siteDir, info, processed, failures, startedAt, !!opts.partial || opts.retryFailed);
   const t = totalsOf(processed);
+  if (opts.partial || opts.retryFailed) log('Ejecución parcial: el resumen y el índice se han mezclado con lo ya existente; el resto del curso no se ha tocado.');
   const wallMs = Date.now() - t0;
   log('');
   log('════════ Resumen ════════');
