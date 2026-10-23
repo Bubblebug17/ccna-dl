@@ -59,6 +59,9 @@ export function verifyChapterHtml(html: string): Omit<VerifyResult, 'localRefs'>
   if (ERROR_RE.test(text.slice(0, 4000)) && text.length < 1500) {
     problems.push('parece una página de error/login en vez de contenido');
   }
+  if (/<meta name="ccna-dl-incomplete"/i.test(html)) {
+    problems.push('captura marcada como incompleta (la carga no había terminado al guardar)');
+  }
   // spinners/cargando visibles (un único <sgpulse-loader> es parte normal de la página)
   const loading = text.match(/\b(cargando|loading)\b\.{0,3}/i);
   if (loading && text.length < 600) problems.push(`solo muestra "${loading[0]}" (contenido sin cargar)`);

@@ -1,5 +1,7 @@
 import { Page, PDFOptions } from 'puppeteer';
 import { delay } from './util/promise';
+import { waitForContentStable } from './content-probe';
+import { getWaitPolicy } from './wait-policy';
 
 export function isLaunchChapterUrl(url: string): boolean {
   return /\/launch\b/.test(url) && url.includes('view=');
@@ -34,6 +36,7 @@ export async function waitForChapterContent(
 }
 
 async function waitForLaunchShell(page: Page, timeout = 60000): Promise<void> {
+  const shellStableMs = getWaitPolicy().shellStableMs;
   const deadline = Date.now() + timeout;
   let stableUrl = '';
   let stableSince = 0;
@@ -54,7 +57,7 @@ async function waitForLaunchShell(page: Page, timeout = 60000): Promise<void> {
       continue;
     }
 
-    if (Date.now() - stableSince < 1500) {
+    if (Date.now() - stableSince < shellStableMs) {
       await delay(200);
       continue;
     }
@@ -218,18 +221,27 @@ export async function scrollLaunchContent(page: Page): Promise<void> {
 }
 
 async function waitForLaunchChapterContent(page: Page): Promise<boolean> {
+  const pol = getWaitPolicy();
   await waitForLaunchShell(page);
 
   const deadline = Date.now() + 90000;
   let readyStreak = 0;
   let lastReadyHeight = 0;
+  let firstReadyAt = 0;
 
-  const settle = async (): Promise<boolean> => {
+  // Asentamiento por CONDICIONES (sin loader/skeleton visible, imágenes cargadas,
+  // red inactiva, DOM sin mutaciones) Y tiempo mínimo (--min-wait) desde que el
+  // contenido apareció. Las condiciones y el mínimo corren a la vez: se espera
+  // lo que tarde lo más lento, nunca menos que el mínimo.
+  const settle = async (since: number): Promise<boolean> => {
     await scrollLaunchContent(page);
-    await page
-      .waitForNetworkIdle({ idleTime: 600, timeout: 10000 })
-      .catch(() => undefined);
-    await delay(800);
+    await Promise.all([
+      page
+        .waitForNetworkIdle({ idleTime: pol.networkIdleMs, timeout: 10000 })
+        .catch(() => undefined),
+      delay(Math.max(0, pol.minWaitMs - (Date.now() - since))),
+    ]);
+    await waitForContentStable(page, { minMs: pol.minWaitMs, since });
     return true;
   };
 
@@ -237,11 +249,12 @@ async function waitForLaunchChapterContent(page: Page): Promise<boolean> {
     const probe = await probeLaunchContent(page);
 
     if (probe.crossOrigin) {
-      await delay(4000);
+      await delay(Math.max(4000, pol.minWaitMs));
       return true;
     }
 
     if (isLaunchContentReady(probe)) {
+      if (!firstReadyAt) firstReadyAt = Date.now();
       const growing =
         lastReadyHeight > 0 &&
         probe.height > lastReadyHeight + 120 &&
@@ -253,25 +266,27 @@ async function waitForLaunchChapterContent(page: Page): Promise<boolean> {
 
       // Capítulos cortos o primera carga: basta 1 lectura estable
       if (readyStreak >= 1) {
-        await delay(probe.height >= 2000 ? 600 : 1200);
+        await delay(300);
         const recheck = await probeLaunchContent(page);
         if (isLaunchContentReady(recheck)) {
-          return settle();
+          return settle(firstReadyAt);
         }
         readyStreak = 0;
+        firstReadyAt = 0;
       }
     } else {
       readyStreak = 0;
       lastReadyHeight = 0;
+      firstReadyAt = 0;
     }
 
     // Primera visita a un capítulo: poll más frecuente mientras carga
-    await delay(probe.loading || !probe.hasIframe ? 450 : 700);
+    await delay(probe.loading || !probe.hasIframe ? 300 : 400);
   }
 
   const last = await probeLaunchContent(page);
   if (isLaunchContentReady(last)) {
-    return settle();
+    return settle(Date.now());
   }
 
   return false;
@@ -439,5 +454,6 @@ export async function gotoChapter(
     waitUntil: 'domcontentloaded',
     timeout: 90_000,
   });
-  await delay(800);
+  // dejar arrancar la SPA; las esperas por condición están en waitForChapterContent
+  await delay(Math.min(800, getWaitPolicy().minWaitMs));
 }

@@ -10,7 +10,7 @@ export const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
 export type AssetOptions = {
-  /** Descargas simultáneas máximas (por capítulo). */
+  /** Descargas simultáneas máximas (del curso entero, compartidas entre pestañas). */
   concurrency: number;
   /** Reintentos adicionales por recurso (HTTP 5xx/429, cortes de red, timeouts). */
   retries: number;
@@ -176,10 +176,75 @@ export type AssetBatchResult = {
   reused: number;
 };
 
+/** Semáforo simple: limita las descargas simultáneas de TODO el curso (todas las pestañas). */
+class Semaphore {
+  private waiting: Array<() => void> = [];
+  private active = 0;
+  constructor(private readonly limit: number) {}
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.active >= this.limit) await new Promise<void>((r) => this.waiting.push(r));
+    this.active++;
+    try {
+      return await fn();
+    } finally {
+      this.active--;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
+type SharedState = {
+  /** Descargas en curso por ruta: un asset compartido entre capítulos paralelos se baja UNA vez. */
+  inflight: Map<string, Promise<boolean>>;
+  gate: Semaphore;
+};
+// El estado compartido cuelga del Map `done` del curso (misma firma pública que antes).
+const shared = new WeakMap<Map<string, boolean>, SharedState>();
+function stateFor(done: Map<string, boolean>, concurrency: number): SharedState {
+  let st = shared.get(done);
+  if (!st) {
+    st = { inflight: new Map(), gate: new Semaphore(Math.max(1, concurrency)) };
+    shared.set(done, st);
+  }
+  return st;
+}
+
+// Cookies de sesión por navegador+origen con caducidad corta (evita una consulta CDP por capítulo).
+const COOKIE_TTL_MS = 30_000;
+const cookieCache = new WeakMap<object, Map<string, { at: number; value: Promise<string> }>>();
+
+function cookieHeaderFor(page: Page, absUrl: string): Promise<string> {
+  let origin = absUrl;
+  try {
+    origin = new URL(absUrl).origin;
+  } catch {
+    // se usa la URL completa
+  }
+  let owner: object = page;
+  try {
+    owner = page.browser();
+  } catch {
+    // página sin navegador: caché propia
+  }
+  let m = cookieCache.get(owner);
+  if (!m) cookieCache.set(owner, (m = new Map()));
+  const hit = m.get(origin);
+  if (hit && Date.now() - hit.at < COOKIE_TTL_MS) return hit.value;
+  const value = page
+    .cookies(absUrl)
+    .then((cs) => cs.map((c) => `${c.name}=${c.value}`).join('; '))
+    .catch(() => '');
+  m.set(origin, { at: Date.now(), value });
+  return value;
+}
+
 /**
  * Descarga los recursos de un capítulo con concurrencia acotada.
  * `done` recuerda (entre capítulos del mismo curso) qué rutas ya se resolvieron;
  * `reasons` guarda el motivo de los fallos para el resumen.
+ * Seguro con capítulos en paralelo: si otra pestaña ya está bajando el mismo
+ * asset, se espera a ese resultado en vez de pedirlo de nuevo, y el total de
+ * descargas simultáneas del curso está acotado por `opts.concurrency`.
  */
 export async function downloadAssets(
   page: Page,
@@ -192,62 +257,84 @@ export async function downloadAssets(
   const failed = new Map<string, string>();
   let downloaded = 0;
   let reused = 0;
+  const st = stateFor(done, opts.concurrency);
 
   const todo: Array<[string, string]> = [];
+  const resolvers = new Map<string, (ok: boolean) => void>();
+  const foreign: Array<Promise<void>> = [];
+  const seen = new Set<string>();
   for (const [absUrl, rel] of Object.entries(assets)) {
+    if (seen.has(rel)) continue; // dos URLs que comparten ruta
+    seen.add(rel);
     if (done.has(rel)) {
       reused++;
       if (!done.get(rel)) failed.set(rel, reasons.get(rel) ?? 'falló antes');
       continue;
     }
+    const pending = st.inflight.get(rel);
+    if (pending) {
+      // otra pestaña ya lo está descargando: esperar su resultado
+      foreign.push(
+        pending.then((ok) => {
+          reused++;
+          if (!ok) failed.set(rel, reasons.get(rel) ?? 'falló antes');
+        })
+      );
+      continue;
+    }
     todo.push([absUrl, rel]);
-    done.set(rel, false); // reserva: evita duplicar si dos URLs comparten ruta
-  }
-
-  // cookies de sesión por origen (una sola consulta CDP por origen)
-  const cookieByOrigin = new Map<string, string>();
-  const cookieFor = async (absUrl: string): Promise<string> => {
-    let origin = absUrl;
-    try {
-      origin = new URL(absUrl).origin;
-    } catch {
-      // se usa la URL completa
-    }
-    if (!cookieByOrigin.has(origin)) {
-      const cookies = await page.cookies(absUrl).catch(() => []);
-      cookieByOrigin.set(origin, cookies.map((c) => `${c.name}=${c.value}`).join('; '));
-    }
-    return cookieByOrigin.get(origin) ?? '';
-  };
-
-  const results = await mapPool(todo, opts.concurrency, async ([absUrl, rel]) => {
-    const cookie = await cookieFor(absUrl);
-    const res = await downloadAsset(
-      absUrl,
-      join(siteDir, rel),
-      {
-        'User-Agent': UA,
-        Referer: opts.referer,
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
-      opts
+    st.inflight.set(
+      rel,
+      new Promise<boolean>((resolve) => resolvers.set(rel, resolve))
     );
-    return { absUrl, rel, res };
-  });
-
-  for (let i = 0; i < results.length; i++) {
-    const [absUrl, rel] = todo[i];
-    const r = results[i];
-    const res = r.ok ? r.value.res : { ok: false, error: errMsg(r.error), attempts: 0 };
-    done.set(rel, res.ok);
-    if (res.ok) {
-      if (res.attempts === 0) reused++; // ya estaba en disco
-      else downloaded++;
-    } else {
-      const reason = `${res.error} (${shortUrl(absUrl)})`;
-      reasons.set(rel, reason);
-      failed.set(rel, reason);
-    }
   }
+
+  const mine = (async () => {
+    const results = await mapPool(todo, opts.concurrency, async ([absUrl, rel]) => {
+      try {
+        const res = await st.gate.run(async () => {
+          const cookie = await cookieHeaderFor(page, absUrl);
+          return downloadAsset(
+            absUrl,
+            join(siteDir, rel),
+            {
+              'User-Agent': UA,
+              Referer: opts.referer,
+              ...(cookie ? { Cookie: cookie } : {}),
+            },
+            opts
+          );
+        });
+        // publicar el resultado en cuanto se tiene (otros capítulos esperan por él)
+        if (!res.ok) reasons.set(rel, `${res.error} (${shortUrl(absUrl)})`);
+        done.set(rel, res.ok);
+        st.inflight.delete(rel);
+        resolvers.get(rel)?.(res.ok);
+        return { absUrl, rel, res };
+      } catch (e) {
+        reasons.set(rel, `${errMsg(e)} (${shortUrl(absUrl)})`);
+        done.set(rel, false);
+        st.inflight.delete(rel);
+        resolvers.get(rel)?.(false);
+        throw e;
+      }
+    });
+
+    for (let i = 0; i < results.length; i++) {
+      const [, rel] = todo[i];
+      const r = results[i];
+      if (r.ok) {
+        const res = r.value.res;
+        if (res.ok) {
+          if (res.attempts === 0) reused++; // ya estaba en disco
+          else downloaded++;
+        } else failed.set(rel, reasons.get(rel) ?? res.error ?? 'error');
+      } else {
+        failed.set(rel, reasons.get(rel) ?? errMsg(r.error));
+      }
+    }
+  })();
+
+  await Promise.all([mine, ...foreign]);
   return { failed, downloaded, reused };
 }

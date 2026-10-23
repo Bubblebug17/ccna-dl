@@ -1,8 +1,9 @@
 import { Page } from 'puppeteer';
-import { writeFile, mkdir, readdir, readFile } from 'fs/promises';
+import { writeFile, mkdir, readdir, readFile, rename } from 'fs/promises';
 import { join } from 'path';
 import { scrollLaunchContent } from './wait-for-chapter-content';
-import { waitUntil } from './util/retry';
+import { inspectContent, waitForContentStable } from './content-probe';
+import { getWaitPolicy } from './wait-policy';
 import {
   AssetOptions,
   DEFAULT_ASSET_OPTIONS,
@@ -43,8 +44,8 @@ type ChapterData = {
 // reescribiendo TODAS las referencias a recursos hacia rutas locales.
 // Además recorre las pestañas (tabs-view) para guardar el panel de CADA pestaña
 // (en la web solo el panel activo existe en el DOM).
-async function serializeChapterData(page: Page): Promise<ChapterData> {
-  return page.evaluate(async () => {
+async function serializeChapterData(page: Page, tabMinMs = 150): Promise<ChapterData> {
+  return page.evaluate(async (tabMinMs: number) => {
     const empty: ChapterData = {
       ok: false,
       title: '',
@@ -72,6 +73,35 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
 
     const baseHref = idoc.baseURI || iframe.src;
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    // Asentamiento de una pestaña recién mostrada: mínimo `tabMinMs` Y condiciones
+    // (2 frames de animación, imágenes del panel cargadas, sin skeleton/spinner visible).
+    // En pestañas en segundo plano (descarga en paralelo) requestAnimationFrame puede no dispararse nunca: se limita con un temporizador.
+    const raf = () =>
+      new Promise<void>((r) => {
+        const t = setTimeout(r, 120);
+        requestAnimationFrame(() => {
+          clearTimeout(t);
+          r();
+        });
+      });
+    const settlePanelOf = async (getPanel: () => Element | undefined) => {
+      const t0 = Date.now();
+      await raf();
+      await raf();
+      while (Date.now() - t0 < 2000) {
+        const p = getPanel();
+        if (!p) break;
+        const imgs = Array.from(p.querySelectorAll('img')) as HTMLImageElement[];
+        const busy = Array.from(p.querySelectorAll('*')).some((e) => {
+          const c = (e.getAttribute('class') || '').toLowerCase();
+          return /skeleton|shimmer|spinner/.test(c) && (e as HTMLElement).getClientRects().length > 0;
+        });
+        if (imgs.every((im) => im.complete) && !busy) break;
+        await sleep(50);
+      }
+      const rest = tabMinMs - (Date.now() - t0);
+      if (rest > 0) await sleep(rest);
+    };
 
     const deepNodes = (root: ParentNode): Element[] => {
       const out: Element[] = [];
@@ -376,7 +406,7 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
                 if (selectedIndex() === i && p && (p.textContent || '').trim().length + p.querySelectorAll('*').length > 0) break;
                 await sleep(50);
               }
-              await sleep(150); // imágenes/estilos del panel recién montado
+              await settlePanelOf(() => getPanels()[0]); // imágenes/estilos del panel recién montado
               const panel = getPanels()[0];
               if (!panel || selectedIndex() !== i) throw new Error('el panel no cambió');
               const pnodes = [panel, ...deepNodes(panel)];
@@ -401,7 +431,7 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
               back.click();
               const t0 = Date.now();
               while (Date.now() - t0 < 2500 && selectedIndex() !== start) await sleep(50);
-              await sleep(150);
+              await settlePanelOf(() => getPanels()[0]);
             }
           } catch {
             // ignorar
@@ -557,7 +587,7 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       subtopics,
       tabs: tabStats,
     };
-  });
+  }, tabMinMs);
 }
 
 function buildStandaloneHtml(data: ChapterData): string {
@@ -830,50 +860,21 @@ export type SaveChapterResult = {
   warnings: string[];
   tabs: { widgets: number; tabs: number; captured: number; failed: number };
   reused: number;
+  /** Carga sin terminar al guardar (loader/skeleton visible o imágenes pendientes) tras re-esperar. */
+  incomplete?: string;
+  /** Se repitió la captura en el sitio porque la primera salió con carga sin terminar. */
+  recaptured?: boolean;
 };
 
-/** Espera a que el DOM del iframe de contenido deje de cambiar (en vez de un sleep fijo). */
-export async function waitForContentStable(
-  page: Page,
-  quietMs = 250,
-  maxMs = 3000
-): Promise<boolean> {
-  let last = '';
-  let since = Date.now();
-  return waitUntil(
-    async () => {
-      const sig = await page.evaluate(() => {
-        const f = Array.from(document.querySelectorAll('iframe')).find((x) =>
-          (x.src || '').includes('authoring-resources')
-        ) as HTMLIFrameElement | undefined;
-        const d = f?.contentDocument;
-        if (!d || !d.body) return '';
-        let n = 0;
-        let imgsPending = 0;
-        const walk = (root: ParentNode) => {
-          const kids = root.querySelectorAll('*');
-          n += kids.length;
-          kids.forEach((el) => {
-            if (el.tagName === 'IMG' && !(el as HTMLImageElement).complete) imgsPending++;
-            if (el.shadowRoot) walk(el.shadowRoot);
-          });
-        };
-        walk(d);
-        return `${n}:${d.body.scrollHeight}:${imgsPending}`;
-      });
-      if (!sig || sig.endsWith(':') ) return false;
-      const pending = Number(sig.split(':')[2] || 0);
-      if (sig !== last) {
-        last = sig;
-        since = Date.now();
-        return false;
-      }
-      return pending === 0 && Date.now() - since >= quietMs;
-    },
-    maxMs,
-    100
-  );
-}
+export type SaveChapterOptions = {
+  /** La página ya se desplazó y estabilizó en prepareChapter: no repetir el scroll completo. */
+  prescrolled?: boolean;
+  /** Re-captura: espera el doble (mínimo y ventana de estabilidad). */
+  patient?: boolean;
+};
+
+/** Marca de captura con carga sin terminar (el modo reanudar la vuelve a descargar). */
+export const INCOMPLETE_META = 'ccna-dl-incomplete';
 
 export async function saveChapterHtml(
   page: Page,
@@ -882,7 +883,8 @@ export async function saveChapterHtml(
   done: Map<string, boolean>,
   chapterId?: string,
   assetOpts: AssetOptions = DEFAULT_ASSET_OPTIONS,
-  assetReasons: Map<string, string> = new Map()
+  assetReasons: Map<string, string> = new Map(),
+  saveOpts: SaveChapterOptions = {}
 ): Promise<SaveChapterResult> {
   const none = (title = ''): SaveChapterResult => ({
     ok: false,
@@ -897,9 +899,44 @@ export async function saveChapterHtml(
     reused: 0,
   });
 
-  await scrollLaunchContent(page);
-  await waitForContentStable(page);
-  const data = await serializeChapterData(page);
+  const pol = getWaitPolicy();
+  const tabMinMs = pol.fast ? 100 : 150;
+  let data!: ChapterData;
+  let recaptured = false;
+  let firstWhy = '';
+  let unfinished: { strong: string[]; weak: string[] } = { strong: [], weak: [] };
+  // Hasta 2 pasadas: si tras serializar aún hay loader/skeleton visible o imágenes
+  // pendientes, se espera más (el doble) y se vuelve a capturar UNA vez.
+  for (let pass = 0; pass < 2; pass++) {
+    const patient = pass > 0 || !!saveOpts.patient;
+    if (pass > 0 || !saveOpts.prescrolled) await scrollLaunchContent(page);
+    await waitForContentStable(page, {
+      quietMs: patient ? pol.stableMs * 2 : pol.stableMs,
+      maxMs: patient ? pol.maxStableMs * 2 : Math.min(pol.maxStableMs, 4000),
+      minMs: patient ? pol.minWaitMs : 0,
+    });
+    const prev = pass > 0 && data?.ok ? data : null;
+    data = await serializeChapterData(page, tabMinMs);
+    if (!data.ok) break;
+    // La serialización reescribe las referencias en el DOM vivo: en la 2ª pasada los recursos de
+    // la 1ª ya aparecen como locales y no se volverían a listar. Se conservan los de ambas pasadas.
+    if (prev) data.assets = { ...prev.assets, ...data.assets };
+    let insp = await inspectContent(page).catch(() => null);
+    // imágenes que acaban de re-montarse (p. ej. al volver a la pestaña inicial): darles un momento
+    for (let i = 0; i < 12 && insp && insp.loaders.length === 0 && insp.imgsPending > 0; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      insp = await inspectContent(page).catch(() => null);
+    }
+    unfinished = {
+      strong: insp ? [...insp.loaders, ...(insp.imgsPending ? [`${insp.imgsPending} imagen(es) sin cargar`] : [])] : [],
+      weak: insp ? insp.empties : [],
+    };
+    if (unfinished.strong.length === 0) break;
+    if (pass === 0) {
+      recaptured = true;
+      firstWhy = [...new Set(unfinished.strong)].slice(0, 3).join(', ');
+    }
+  }
   if (!data.ok || data.html.length < 200) {
     return { ...none(data.title), problems: ['no se encontró el contenido del capítulo (iframe vacío)'] };
   }
@@ -944,8 +981,17 @@ export async function saveChapterHtml(
       tabs: data.tabs,
     };
   }
+  const incomplete = unfinished.strong.length
+    ? `carga sin terminar al guardar: ${[...new Set(unfinished.strong)].slice(0, 3).join(', ')}`
+    : '';
+  const finalHtml = incomplete
+    ? docHtml.replace(/<\/head>/i, `<meta name="${INCOMPLETE_META}" content="1">\n</head>`)
+    : docHtml;
   await mkdir(join(siteDir, 'chapters'), { recursive: true });
-  await writeFile(filePath, docHtml, 'utf8');
+  // escritura atómica: un corte (Ctrl+C, apagón) nunca deja un capítulo a medias
+  const part = `${filePath}.part`;
+  await writeFile(part, finalHtml, 'utf8');
+  await rename(part, filePath);
 
   let subtopics = filterSubtopics(data.subtopics);
   if (chapterId) {
@@ -973,6 +1019,12 @@ export async function saveChapterHtml(
         [...new Set(missingOnServer)].slice(0, 2).join(' | ')
     );
   }
+  if (recaptured) {
+    warnings.push(incomplete ? 'recapturado una vez; sigue con carga sin terminar' : `recapturado una vez (la primera captura tenía la carga sin terminar: ${firstWhy})`);
+  }
+  if (!incomplete && unfinished.weak.length) {
+    warnings.push(`${unfinished.weak.length} contenedor(es) de contenido vacío(s) (${[...new Set(unfinished.weak)].slice(0, 2).join(', ')})`);
+  }
   if (data.tabs.failed > 0) {
     warnings.push(`${data.tabs.failed} pestaña(s) no se pudieron capturar (${data.tabs.captured}/${data.tabs.tabs})`);
   }
@@ -988,6 +1040,8 @@ export async function saveChapterHtml(
     warnings,
     tabs: data.tabs,
     reused: batch.reused,
+    incomplete: incomplete || undefined,
+    recaptured,
   };
 }
 
