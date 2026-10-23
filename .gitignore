@@ -30,3 +30,9 @@ pnpm-debug.log*
 
 # Misc
 .DS_Store
+
+# Cursos descargados (carpetas con UUID)
+/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*/
+/data/
+/validation-report.md
+/downloads-failures.json
