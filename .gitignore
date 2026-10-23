@@ -36,3 +36,4 @@ pnpm-debug.log*
 /data/
 /validation-report.md
 /downloads-failures.json
+/validation.json
