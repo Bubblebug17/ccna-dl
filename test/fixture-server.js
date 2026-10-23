@@ -3,6 +3,34 @@
 // iframe "authoring-resources", Shadow DOM, pestañas, CSS con fuentes,
 // recursos que fallan a propósito. No toca internet.
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path_ = require('path');
+const { spawnSync } = require('child_process');
+
+// Vídeo real mínimo (2 s, h264+aac, ~10 KB) y su versión HLS, generados con ffmpeg y cacheados en %TEMP%.
+// Sin ffmpeg -> media.ok = false y las pruebas de vídeo se omiten.
+let MEDIA = null;
+function makeMedia() {
+  if (MEDIA) return MEDIA;
+  const dir = path_.join(os.tmpdir(), 'ccna-fixture-media-v1');
+  const mp4 = path_.join(dir, 'clip.mp4');
+  const m3u8 = path_.join(dir, 'hls', 'index.m3u8');
+  const run = (args) => spawnSync(process.env.FFMPEG_PATH || 'ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: 'ignore' });
+  try {
+    if (!fs.existsSync(mp4) || !fs.existsSync(m3u8)) {
+      fs.mkdirSync(path_.join(dir, 'hls'), { recursive: true });
+      const a = run(['-f', 'lavfi', '-i', 'testsrc=size=96x64:rate=10:duration=2', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'ultrafast', '-c:a', 'aac', '-shortest', '-movflags', '+faststart', mp4]);
+      const b = run(['-i', mp4, '-c', 'copy', '-f', 'hls', '-hls_time', '4', '-hls_list_size', '0', '-hls_segment_filename', path_.join(dir, 'hls', 'seg%d.ts'), m3u8]);
+      if (a.status !== 0 || b.status !== 0) throw new Error('ffmpeg falló');
+    }
+    MEDIA = { ok: true, mp4: fs.readFileSync(mp4), m3u8: fs.readFileSync(m3u8), dir };
+  } catch {
+    MEDIA = { ok: false };
+  }
+  return MEDIA;
+}
+const VTT = 'WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHola desde el vídeo\n\n00:00:01.000 --> 00:00:02.000\nSegunda línea\n\n';
 
 // PNG de color liso (pocos KB comprimido, pero NxN píxeles al decodificar: ~4·N² bytes en RAM del renderer).
 function bigPng(n, shade) {
@@ -63,6 +91,7 @@ function createFixture(opts = {}) {
   const slow = Number(q.get('slow') || 0);
   const sticky = q.get('sticky') === '1';
   const heavy = q.get('heavy') === '1';
+  const video = q.get('video') || ''; // 'mp4' | 'hls' | 'none' (el reproductor nunca monta el <video>)
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Capítulo ${n}</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -79,6 +108,10 @@ ${clean ? '' : `<img id="flaky" src="/img/flaky.png" alt="flaky">`}
 ${clean ? '' : `<img id="missing" src="/img/missing.png" alt="missing">`}
 ${clean ? '' : `<img id="down" src="/img/down.png" alt="down">`}
 ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
+<h3>1.1.1 Tema real de ejemplo</h3>
+<p>Redes: 10.1.0.0/16 y 172.16.5.0/24 son direcciones, no temas. El router 2.2.2.2 también.</p>
+<p>172.16.5.0/24 red de la sucursal con texto suficiente</p>
+${video ? '<media-view></media-view>' : ''}
 <a id="pka" role="button" href="/assets/files/lab_a_es-xl.pka">Laboratorio PT</a>
 <img id="uniq" src="/img/u${n}.png" alt="unico">
 <x-lazy></x-lazy>
@@ -98,6 +131,37 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
   }
   customElements.define('x-lazy', XLazy);
 </script>
+${video ? `<script>
+  // Reproductor perezoso como el de Netacad: solo póster + botón play; el <video> aparece al pulsar play
+  class MediaView extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<div class="video-container signed-video" data-videoids="abc-123" style="height:300px"><div class="media-poster"><img src="/img/ok.png" alt="Clip de prueba"></div><button class="vjs-big-play-button" type="button" aria-label="Play Clip de prueba"></button></div>';
+      const box = root.querySelector('.video-container');
+      root.querySelector('button').addEventListener('click', () => {
+        if ('${video}' === 'none') return;
+        const v = document.createElement('video');
+        v.className = 'video-js';
+        v.setAttribute('controls', '');
+        box.innerHTML = '';
+        box.appendChild(v);
+        setTimeout(() => {
+          if ('${video}' === 'mp4') {
+            v.src = '/media/signed/abc123?token=1'; // URL firmada sin extensión
+          } else {
+            fetch('/hls/index.m3u8').then((r) => r.text()).catch(() => '');
+            v.src = URL.createObjectURL(new Blob([new Uint8Array(16)], { type: 'video/mp4' })); // MSE/HLS: blob:
+          }
+          const t = document.createElement('track');
+          t.setAttribute('kind', 'captions'); t.setAttribute('srclang', 'es'); t.setAttribute('label', 'Español'); t.setAttribute('default', '');
+          t.setAttribute('src', '/media/sub.vtt');
+          v.appendChild(t);
+        }, 300);
+      });
+    }
+  }
+  customElements.define('media-view', MediaView);
+</script>` : ''}
 <script>
   class XWidget extends HTMLElement {
     connectedCallback() {
@@ -143,7 +207,7 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
     const lp = path === '/launch' ? url.searchParams : null;
     if (lp) {
       const n = (lp.get('_chapter') || '1.1.1').split('.')[0];
-      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
+      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
       return send(200, 'text/html', `<!doctype html><html><head><title>Launch ${n}</title></head><body><main id="main-content"><h1>Curso de prueba</h1><iframe src="/authoring-resources/ch${n}.html${extra ? '?' + extra : ''}" style="width:1000px;height:900px;border:0"></iframe></main></body></html>`);
     }
     const m = path.match(/^\/launch(\d+)\.html$/);
@@ -160,6 +224,13 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
     if (path === '/fonts/ciscoSansTT-Thin.woff2') return send(404, 'text/plain', 'nope');
     if (/^\/img\/big(\d+)\.png$/.test(path)) return send(200, 'image/png', bigImg(Number(path.match(/(\d+)/)[1])));
     if (/^\/media\/clip\d+\.mp4$/.test(path)) return send(200, 'video/mp4', Buffer.alloc(6 * 1024 * 1024, 3));
+    if (path === '/media/signed/abc123') return makeMedia().ok ? send(200, 'video/mp4', makeMedia().mp4) : send(404, 'text/plain', 'sin ffmpeg');
+    if (path === '/media/sub.vtt') return send(200, 'text/vtt', VTT);
+    if (path === '/hls/index.m3u8') return makeMedia().ok ? send(200, 'application/vnd.apple.mpegurl', makeMedia().m3u8) : send(404, 'text/plain', 'sin ffmpeg');
+    if (/^\/hls\/seg\d+\.ts$/.test(path) && makeMedia().ok) {
+      const f = path_.join(makeMedia().dir, path.slice(1));
+      return fs.existsSync(f) ? send(200, 'video/mp2t', fs.readFileSync(f)) : send(404, 'text/plain', 'nope');
+    }
     if (path === '/img/ok.png' || /^\/img\/(panel|u)\d+\.png$/.test(path)) return send(200, 'image/png', PNG);
     if (path === '/img/flaky.png') {
       return hits[path] <= 2 ? send(503, 'text/plain', 'busy') : send(200, 'image/png', PNG);
@@ -193,4 +264,4 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
   });
 }
 
-module.exports = { createFixture };
+module.exports = { createFixture, makeMedia };

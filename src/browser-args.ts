@@ -21,6 +21,7 @@ export function chromeLaunchArgs(opts: { headful?: boolean } = {}): string[] {
     '--disable-breakpad',
     '--no-first-run',
     '--mute-audio',
+    '--autoplay-policy=no-user-gesture-required',
     '--disable-dev-shm-usage',
     '--disk-cache-size=52428800',
     '--media-cache-size=1',

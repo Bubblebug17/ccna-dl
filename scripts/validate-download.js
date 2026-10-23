@@ -56,7 +56,7 @@ function parseArgs(argv) {
 const SKIP_DIRS = new Set(['node_modules', '.git', 'lib', 'src', 'scripts', 'img', '.github', '.vscode']);
 const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp', 'avif']);
 const FONT_EXT = new Set(['woff2', 'woff', 'ttf', 'otf', 'eot']);
-const BIN_EXT = new Set([...IMG_EXT, ...FONT_EXT, 'pdf', 'zip', 'mp4', 'webm', 'mp3', 'pka', 'pkt', 'pksz', 'pkz']);
+const BIN_EXT = new Set([...IMG_EXT, ...FONT_EXT, 'pdf', 'zip', 'mp4', 'webm', 'vtt', 'mp3', 'pka', 'pkt', 'pksz', 'pkz']);
 const REMOTE_HOST_RE = /(^|\.)(netacad\.com|cisco\.com|ciscolearning\.com|cdn[\w.-]*|cloudfront\.net|akamai[\w.]*|googleapis\.com|gstatic\.com|jsdelivr\.net|unpkg\.com|cdnjs\.cloudflare\.com|fonts\.g[\w.]+)$/i;
 const IGNORE_HOST_RE = /(^|\.)(w3\.org|schema\.org|purl\.org)$/i;
 
@@ -103,6 +103,44 @@ function cmpChapter(a, b) {
   }
   return 0;
 }
+
+// ───────────────────────── Capítulos / subtemas sospechosos ─────────────────────────
+/** Sección real de un id de archivo: "1" -> "1.1", "2.3" -> "2.3". */
+function sectionOf(id) {
+  return /^\d+\.\d+$/.test(id) ? id : /^\d+$/.test(id) ? id + '.1' : null;
+}
+
+/**
+ * ¿Un subtema (n.n.n + título) es falso? Casos reales: IPs/redes del texto ("10.1.0.0/16" -> "10.1.0" con
+ * título ".0/16"), números que no pertenecen a la sección del capítulo ("172.16.5" en 1.3).
+ */
+function bogusSubtopic(sub, title, section) {
+  const t = (title || '').trim();
+  if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(sub)) return 'número con forma de IP';
+  if (!t) return 'sin título';
+  if (/^[./]/.test(t)) return 'título "' + t.slice(0, 20) + '" (resto de una IP/red)';
+  if (!/\p{L}/u.test(t)) return 'título sin letras ("' + t.slice(0, 20) + '")';
+  if (section && !sub.startsWith(section + '.')) return 'no pertenece a la sección ' + section;
+  return null;
+}
+
+/** Subtemas (data-sub) guardados en un capítulo, con el título del encabezado que los sigue. */
+function subtopicsOfHtml(html) {
+  const out = [];
+  const seen = new Set();
+  const re = /\sdata-sub="(\d+(?:\.\d+)*)"/g;
+  let m;
+  while ((m = re.exec(html))) {
+    if (seen.has(m[1])) continue;
+    seen.add(m[1]);
+    const chunk = html.slice(m.index, m.index + 8000);
+    const tm = /class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/i.exec(chunk) || /<h[1-6][^>]*>([^<]+)/i.exec(chunk);
+    out.push({ sub: m[1], title: tm ? decodeEntities(tm[1]).trim() : 'Subtema ' + m[1] });
+  }
+  return out;
+}
+
+const QUIZ_TITLE_RE = /^\s*(prueba de mi conocimiento|prueba de conocimiento|knowledge check|comprueba tu conocimiento|mon contr[oô]le)/i;
 
 // ───────────────────────── Parseo HTML ligero ─────────────────────────
 const TAG_RE = /<([a-zA-Z][\w:-]*)((?:\s+[^\s"'<>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*\/?>/g;
@@ -172,6 +210,7 @@ function analyzeHtml(html) {
     hasClosingHtml: /<\/html>\s*$/i.test(html),
     absoluteInText: [],
     badFragmentRefs: 0,
+    video: { bigPlay: 0, videos: 0, offline: 0, tracks: 0 },
   };
 
   const tm = /<title>([^<]*)<\/title>/i.exec(html);
@@ -224,12 +263,18 @@ function analyzeHtml(html) {
     if (a.poster && tag !== 'video') add('poster', a.poster);
     if (a.style && a.style.includes('url(')) for (const u of cssRefs(decodeEntities(a.style))) info.refs.push({ kind: 'style-attr', url: u });
 
+    if (tag === 'video') {
+      info.video.videos++;
+      if ('data-ccna-media' in a) info.video.offline++;
+    }
+    if (tag === 'track') info.video.tracks++;
     // señales de "cargando"
     const cls = (a.class || '').toLowerCase();
     const inlineHidden = /display\s*:\s*none|visibility\s*:\s*hidden/i.test(a.style || '') || 'hidden' in a || a['aria-hidden'] === 'true';
     if (tag === 'sgpulse-loader' || /\b(loading-spinner|spinner|is-loading)\b/.test(cls) || a['aria-busy'] === 'true') {
       info.spinners.push({ tag, cls: cls.slice(0, 50), hidden: inlineHidden });
     }
+    if (/\bvjs-big-play-button\b/.test(cls)) info.video.bigPlay++;
     if (tag === 'assessment-loader' || /cyu-quiz|assessment-loader/.test(cls)) info.quiz.loaders++;
     if (tag === 'form' && /cyu-quiz/.test(cls)) info.quiz.forms++;
 
@@ -332,6 +377,15 @@ function sniffProblem(file, size) {
     case 'woff2':
       if (!head.startsWith('wOF2')) return 'no es una fuente WOFF2 válida';
       break;
+    case 'mp4':
+      if (head.slice(4, 8) !== 'ftyp' && head.slice(4, 8) !== 'moov') return 'no es un MP4 válido (sin cabecera ftyp)';
+      break;
+    case 'webm':
+      if (!(b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3)) return 'no es un WebM válido';
+      break;
+    case 'vtt':
+      if (!/^\uFEFF?WEBVTT/.test(head)) return 'no es un WebVTT válido (falta la cabecera WEBVTT)';
+      break;
     case 'zip':
     case 'pkz':
       if (!head.startsWith('PK')) return 'no es un ZIP válido';
@@ -411,6 +465,21 @@ function validateCourse(courseDir, opt) {
       while ((m = re2.exec(idx))) set.add(decodeEntities(m[1]));
     }
     indexFiles = [...set];
+    // subtemas falsos en la barra lateral (IPs tomadas por "1.2.3 Título")
+    const subRe = /<li class="sub"><a href="([^"#]+)#sub-([^"]+)"[^>]*><span class="num">([^<]*)<\/span>\s*<span class="t">([^<]*)<\/span>/g;
+    const fakeSubs = [];
+    let subTotal = 0;
+    while ((m = subRe.exec(idx))) {
+      subTotal++;
+      const id = decodeEntities(m[1]).replace(/^chapters\//, '').replace(/\.html$/i, '');
+      const why = bogusSubtopic(decodeEntities(m[3]), decodeEntities(m[4]), sectionOf(id));
+      if (why) fakeSubs.push(decodeEntities(m[3]) + ' "' + decodeEntities(m[4]).slice(0, 24) + '" en ' + id + ' (' + why + ')');
+    }
+    res.indexSubtopics = { total: subTotal, fake: fakeSubs.length };
+    if (fakeSubs.length)
+      P.avisos.push(
+        'capítulo sospechoso: el índice tiene ' + fakeSubs.length + ' de ' + subTotal + ' subtemas falsos (direcciones IP/redes tomadas por subtemas): ' + fakeSubs.slice(0, 4).join(' | ') + (fakeSubs.length > 4 ? ' …' : '') + '. Se limpia con: node scripts/clean-fake-chapters.js --apply'
+      );
     if (!indexFiles.length) P.graves.push('index.html no enlaza a ningún capítulo');
     const iframeSrc = /<iframe[^>]*src="([^"]*)"/i.exec(idx);
     if (iframeSrc && iframeSrc[1] && !fs.existsSync(path.join(courseDir, iframeSrc[1].split('#')[0]))) P.graves.push('el iframe inicial del índice apunta a un archivo inexistente: ' + iframeSrc[1]);
@@ -438,6 +507,30 @@ function validateCourse(courseDir, opt) {
       P.graves.push(
         `El índice (index.html) solo enlaza ${indexFiles.length} de ${chapterFiles.length} capítulos; ${unlisted.length} están en disco pero no en el índice (${unlisted.slice(0, 6).join(', ')}${unlisted.length > 6 ? '…' : ''}). Se arregla regenerando el índice (--reindex o volver a ejecutar la descarga).`
       );
+  }
+
+  // --- ids duplicados en el resumen de la descarga (dos elementos que escriben el mismo archivo) ---
+  try {
+    const sumPath = ['descarga-resumen.json', 'download-summary.json'].map((n) => path.join(courseDir, n)).find((p) => fs.existsSync(p));
+    if (sumPath) {
+      const sum = JSON.parse(fs.readFileSync(sumPath, 'utf8'));
+      const list = Array.isArray(sum) ? sum : sum.capitulos || sum.chapters || sum.outcomes || [];
+      const by = new Map();
+      for (const e of list) {
+        const id = e && (e.chapter || e.capitulo);
+        if (!id) continue;
+        if (!by.has(id)) by.set(id, []);
+        by.get(id).push(e.url || e.chapterUrl || '');
+      }
+      const dups = [...by.entries()].filter(([, u]) => u.length > 1);
+      res.duplicateChapterIds = dups.map(([id]) => id);
+      for (const [id, urlsOfId] of dups) {
+        const q = urlsOfId.map((u) => (/_chapter=([\d.]+)/.exec(u) || [])[1]).filter(Boolean);
+        P.graves.push('capítulo sospechoso: el id "' + id + '" aparece ' + urlsOfId.length + ' veces en ' + path.basename(sumPath) + (q.length ? ' (_chapter=' + q.join(', ') + ')' : '') + ': el último sobrescribió a los demás en chapters/' + id + '.html');
+      }
+    }
+  } catch (e) {
+    /* resumen ilegible: se ignora */
   }
 
   // --- huecos en la numeración ---
@@ -541,6 +634,23 @@ function validateCourse(courseDir, opt) {
     if (h.accordionsClosed) chap.notes.push(h.accordionsClosed + ' acordeón(es) colapsado(s) (contenido presente en el HTML, se abre con clic)');
     if (h.mbar) chap.warnings.push('carrusel mbar con ' + h.mbar + ' contenedor(es): comprobar que todas las diapositivas estén en el HTML');
     if (a.badFragmentRefs) chap.notes.push(a.badFragmentRefs + ' referencia(s) SVG url(#id) mal reescritas a URL absoluta (en el HTML)');
+    // capítulo sospechoso: es un cuestionario (sobrescribió la sección real) o su título no corresponde al archivo
+    const secOfFile = sectionOf(chap.id);
+    if (a.title && QUIZ_TITLE_RE.test(a.title))
+      chap.issues.push('capítulo sospechoso: el título es "' + a.title.slice(0, 50) + '" (un cuestionario), no la sección ' + (secOfFile || chap.id) + ': probablemente sobrescribió el contenido real; vuelva a descargarlo');
+    const tnum = /\|\s*(\d+\.\d+)\.?\s/.exec(a.title || '');
+    if (tnum && secOfFile && tnum[1] !== secOfFile)
+      chap.warnings.push('capítulo sospechoso: el título dice ' + tnum[1] + ' pero el archivo es ' + chap.id + ' (¿colisión de ids?)');
+    const fakeInChap = subtopicsOfHtml(html).filter((x) => bogusSubtopic(x.sub, x.title, secOfFile));
+    if (fakeInChap.length) {
+      chap.warnings.push('capítulo sospechoso: ' + fakeInChap.length + ' subtema(s) falso(s) en data-sub (' + fakeInChap.slice(0, 4).map((x) => x.sub + ' "' + x.title.slice(0, 14) + '"').join(', ') + ')');
+      chap.fakeSubs = fakeInChap.map((x) => x.sub);
+    }
+    // vídeos: reproductor perezoso sin activar (solo póster) = no se puede reproducir offline
+    const pendingVideos = Math.max(0, a.video.bigPlay - a.video.videos);
+    chap.videos = { total: a.video.videos + pendingVideos, offline: a.video.offline, pending: pendingVideos, tracks: a.video.tracks };
+    if (pendingVideos)
+      chap.warnings.push(pendingVideos + ' vídeo(s) sin reproductor offline (solo póster + botón de play; no hay <video> ni fuente guardada). Vuelva a descargar este capítulo.');
     if (a.title && titles.has(a.title)) chap.warnings.push('mismo <title> que ' + titles.get(a.title));
     if (a.title) titles.set(a.title, chap.file);
     if (a.title && !/\|/.test(a.title)) chap.notes.push('título sin prefijo de módulo: "' + a.title.slice(0, 60) + '"');
@@ -809,4 +919,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { analyzeHtml, validateCourse, cssRefs, resolveLocal, compareTwins };
+module.exports = { analyzeHtml, validateCourse, cssRefs, resolveLocal, compareTwins, bogusSubtopic, subtopicsOfHtml, sectionOf, sniffProblem };

@@ -33,7 +33,7 @@ async function run(fx, spec) {
   const args = ['--no-sandbox', '--disable-setuid-sandbox', ...(now ? chromeLaunchArgs({}) : OLD_ARGS)];
   const browser = await puppeteer.launch({ headless: true, executablePath: CHROME, args });
   const pid = browser.process().pid;
-  const patterns = now ? [...TRACKER_PATTERNS, ...MEDIA_PATTERNS] : TRACKER_PATTERNS;
+  const patterns = now && process.env.BLOCK_MEDIA ? [...TRACKER_PATTERNS, ...MEDIA_PATTERNS] : TRACKER_PATTERNS; // el bloqueo de medios es opcional (--block-media)
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'ccna-mem-'));
   const mk = async () => {
     const p = await browser.newPage();

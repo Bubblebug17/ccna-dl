@@ -12,7 +12,7 @@ import {
   SaveChapterResult,
 } from './save-chapter-html';
 import { AssetOptions, DEFAULT_ASSET_OPTIONS } from './download-assets';
-import { CHAPTER_FORMAT, verifyChapterFile } from './verify-chapter';
+import { chapterUpToDate, verifyChapterFile } from './verify-chapter';
 import {
   ChapterOutcome,
   FAILURES_FILE,
@@ -23,6 +23,7 @@ import {
   writeRunFiles,
 } from './run-summary';
 import { urlToChapter as urlToChapterId } from './url-to-chapter-id';
+import { dedupeByFileId } from './chapter-ids';
 import { backoffMs, fmtDuration, mapPool } from './util/retry';
 import { delay } from './util/promise';
 import { createProgress } from './progress';
@@ -65,6 +66,8 @@ export type SaveCourseOptions = {
   recycleHeapMb?: number;
   /** Para pruebas: RAM libre (MB) simulada. */
   freeMemMb?: () => number;
+  /** Activa los reproductores de vídeo y guarda vídeo + subtítulos (por defecto sí; false = --no-videos). */
+  videos?: boolean;
 };
 
 export type SaveCourseResult = {
@@ -133,6 +136,10 @@ export async function saveLaunchCourseSite(
   await mkdir(chaptersDir, { recursive: true });
   await page.setViewport(VIEWPORT);
 
+  // dos URLs con el mismo id de archivo (p. ej. 2.2 y 2.2.1) se pisarían: nos quedamos con la sección real
+  const dedup = dedupeByFileId(urls, urlToChapterId);
+  urls = dedup.urls;
+
   const info = { courseId, courseTitle, courseUrl: opts.courseUrl };
   const previous = (await readFailures(siteDir))?.failures ?? [];
 
@@ -158,6 +165,9 @@ export async function saveLaunchCourseSite(
   const progress = createProgress(todo.length, { enabled: opts.progressBar });
   const log = opts.log ?? progress.log;
   for (const l of preLogs) log(l);
+  for (const d of dedup.dropped) {
+    log(`⚠ Se ignora el elemento ${d.chapter}: usaría el mismo archivo (${chapterFileName(d.fileId)}) que ${d.keptChapter} y lo sobrescribiría.`);
+  }
   if (!opts.retryFailed) {
     log(
       `Guardando ${urls.length} capítulos como HTML en ${siteDir}` +
@@ -175,6 +185,7 @@ export async function saveLaunchCourseSite(
 
   // ---- reanudación: se verifican en paralelo los capítulos ya guardados ----
   const queue: number[] = [];
+  const wantVideos = opts.videos !== false;
   if (opts.resume && !opts.retryFailed) {
     const checks = await mapPool(todo, 8, async (u) =>
       verifyChapterFile(join(chaptersDir, chapterFileName(chapterIdFromUrl(u))), siteDir)
@@ -183,14 +194,18 @@ export async function saveLaunchCourseSite(
       const chapter = chapterIdFromUrl(todo[idx]);
       const c = checks[idx];
       const v = c.ok ? c.value : undefined;
-      if (v && v.ok && v.format >= CHAPTER_FORMAT) {
+      if (v && chapterUpToDate(v, wantVideos)) {
         log(`${tag(idx)} · omitido (ya guardado y verificado)`);
         outcomes[idx] = { chapter, url: todo[idx], status: 'omitido' };
         progress.tick();
         continue;
       }
       if (v && v.bytes > 0) {
-        const why = !v.ok ? v.problems[0] : `formato antiguo (v${v.format}, faltan pestañas/fuentes)`;
+        const why = !v.ok
+          ? v.problems[0]
+          : v.format >= 2 && v.videosPending > 0
+            ? `${v.videosPending} vídeo(s) sin reproductor offline (se activarán y descargarán)`
+            : `formato antiguo (v${v.format}, faltan pestañas/fuentes)`;
         log(`${tag(idx)} · se vuelve a descargar: ${why}`);
       }
       queue.push(idx);
@@ -259,6 +274,7 @@ export async function saveLaunchCourseSite(
             await opts.prepareChapter(wp, chapterUrl);
             let r = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
               prescrolled: !!opts.prepareScrolls,
+              videos: wantVideos,
             });
             // Carga sin terminar al guardar (loader/skeleton visible): recarga y re-captura UNA vez, con más paciencia.
             if (r.ok && r.incomplete && !fullRecapture) {
@@ -267,6 +283,7 @@ export async function saveLaunchCourseSite(
               await opts.prepareChapter(wp, chapterUrl);
               const r2 = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
                 prescrolled: !!opts.prepareScrolls,
+                videos: wantVideos,
                 patient: true,
               });
               if (r2.ok) r = { ...r2, recaptured: true };

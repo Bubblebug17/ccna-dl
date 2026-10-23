@@ -29,14 +29,15 @@ export const TRACKER_PATTERNS = [
 ];
 
 /**
- * Vídeo/audio: el navegador no los necesita (ocupan RAM en el renderer al precargarse);
- * los recursos del capítulo se descargan aparte con fetch desde Node. Se bloquean por defecto
- * (desactivar con --no-block-media).
+ * Vídeo/audio. SOLO con --block-media (opcional): ahorra RAM en el renderer, pero entonces los reproductores
+ * no pueden cargar su fuente y los vídeos no se pueden capturar. Por defecto NO se bloquean: el reproductor
+ * de Netacad se activa (play) para leer la URL real del vídeo, que luego se descarga aparte con Node.
+ * No incluye los manifiestos (.m3u8/.mpd): sin ellos el reproductor HLS ni siquiera se monta.
  */
-export const MEDIA_PATTERNS = ['*.mp4*', '*.webm*', '*.mp3*', '*.m4a*', '*.ogv*', '*.m3u8*'];
+export const MEDIA_PATTERNS = ['*.mp4*', '*.webm*', '*.mp3*', '*.m4a*', '*.ogv*'];
 
-/** Solo con --fast: vídeo/audio (también con --no-block-media) y el gestor de etiquetas de Adobe. */
-export const AGGRESSIVE_PATTERNS = [...MEDIA_PATTERNS, '*adobedtm.com*'];
+/** Solo con --fast: el gestor de etiquetas de Adobe (los vídeos NO se bloquean: --fast no impide capturarlos). */
+export const AGGRESSIVE_PATTERNS = ['*adobedtm.com*'];
 
 export type BlockStats = { blocked: number };
 

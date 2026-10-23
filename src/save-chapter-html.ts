@@ -9,7 +9,10 @@ import {
   DEFAULT_ASSET_OPTIONS,
   downloadAssets,
 } from './download-assets';
-import { CHAPTER_FORMAT, verifyChapterHtml } from './verify-chapter';
+import { CHAPTER_FORMAT, CHAPTER_FORMAT_NO_VIDEOS, verifyChapterHtml } from './verify-chapter';
+import { captureVideos, EMPTY_CAPTURE, VideoCaptureResult } from './capture-videos';
+import { inlineLocalTracks } from './inline-vtt';
+import { filterPlausibleSubtopics, sectionOfChapter } from './subtopics';
 import sanitize = require('sanitize-filename');
 
 type Subtopic = { sub: string; title: string };
@@ -22,8 +25,8 @@ function isQuizSubtopic(title: string): boolean {
   return QUIZ_SUBTOPIC.test(title.trim());
 }
 
-function filterSubtopics(subs: Subtopic[]): Subtopic[] {
-  return subs.filter((s) => !isQuizSubtopic(s.title));
+function filterSubtopics(subs: Subtopic[], section?: string): Subtopic[] {
+  return filterPlausibleSubtopics(subs, section).filter((s) => !isQuizSubtopic(s.title));
 }
 
 type ChapterData = {
@@ -130,7 +133,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
     const VID = ['mp4', 'webm', 'ogg', 'ogv', 'mov', 'm4v', 'mp3', 'wav'];
     const FILE = [
       'pdf', 'pka', 'pkt', 'pksz', 'pkz', 'zip', 'doc', 'docx', 'ppt',
-      'pptx', 'xls', 'xlsx', 'txt', 'csv', 'json',
+      'pptx', 'xls', 'xlsx', 'txt', 'csv', 'json', 'vtt', 'srt',
     ];
     const catFor = (ext: string): string => {
       if (FONT.includes(ext)) return 'fonts/';
@@ -160,7 +163,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
     };
 
     // Devuelve la ruta relativa (desde chapters/) para usar en el HTML.
-    const localRef = (rawUrl: string): string | null => {
+    const localRef = (rawUrl: string, extHint?: string): string | null => {
       const abs = resolve(rawUrl);
       if (!abs) return null;
       if (!assets[abs]) {
@@ -175,6 +178,12 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
         let base = (path.split('/').pop() || 'asset').toLowerCase();
         const dot = base.lastIndexOf('.');
         if (dot > 0) ext = base.slice(dot + 1).replace(/[^a-z0-9]/g, '');
+        // fuente de vídeo/subtítulos sin extensión útil (URL firmada, .m3u8 -> mp4): la extensión la dicta el reproductor
+        if (extHint) {
+          const stem = base.replace(/\.[a-z0-9]+$/, '').replace(/[^a-z0-9._-]/g, '_').slice(-40) || 'media';
+          ext = extHint;
+          base = stem + '.' + extHint;
+        }
         base = base.replace(/[^a-z0-9._-]/g, '_').slice(-48) || 'asset';
         const canonical = 'assets/' + catFor(ext) + hashStr(abs) + '_' + base;
         assets[abs] = canonical;
@@ -217,7 +226,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
     const setRef = (el: Element, attr: string) => {
       const val = el.getAttribute(attr);
       if (!val) return;
-      const ref = localRef(val);
+      const ref = localRef(val, attr === 'src' ? el.getAttribute('data-ccna-ext') || undefined : undefined);
       if (ref) el.setAttribute(attr, ref);
     };
 
@@ -512,7 +521,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
     const statusPrefix =
       /^\s*(?:(?:completas?|incomplet[oa]s?|complete|incomplete)\s*)?/i;
     const subRe = new RegExp(
-      '^\\s*(?:(?:completas?|incomplet[oa]s?|complete|incomplete)\\s*)?(\\d+\\.\\d+\\.\\d+)\\b',
+      '^\\s*(?:(?:completas?|incomplet[oa]s?|complete|incomplete)\\s*)?(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(?!\\.\\d|\\/)\\b',
       'i'
     );
 
@@ -524,8 +533,12 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
 
       const title = txt
         .replace(statusPrefix, '')
-        .replace(/^\d+\.\d+\.\d+\s*/i, '')
+        .replace(/^\d+\.\d+\.\d+\.?\s*/i, '')
         .slice(0, 90);
+
+      // IPs/redes del texto ("10.1.0.0/16" -> "10.1.0" + ".0/16") NO son subtemas:
+      // el título debe tener texto real (al menos una letra) y no empezar por "." ni "/".
+      if (!title.trim() || /^[./]/.test(title.trim()) || !/\p{L}/u.test(title)) return;
 
       // Omitir cuestionarios (p.ej. 1.6.4 "Prueba de mi conocimiento")
       const quizRe =
@@ -590,7 +603,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
   }, tabMinMs);
 }
 
-function buildStandaloneHtml(data: ChapterData): string {
+function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT): string {
   const sheetsJson = JSON.stringify(data.sheets).replace(/<\//g, '<\\/');
 
   const loader = `
@@ -776,7 +789,7 @@ function buildStandaloneHtml(data: ChapterData): string {
 </script>`;
 
   let inner = data.html;
-  const meta = `<meta name="ccna-dl-format" content="${CHAPTER_FORMAT}">`;
+  const meta = `<meta name="ccna-dl-format" content="${format}">`;
   if (/<head[^>]*>/i.test(inner)) {
     inner = inner.replace(/<head[^>]*>/i, (m) => m + meta);
   } else {
@@ -802,7 +815,7 @@ async function collectOutlineSubtopics(
       document.querySelector('[class*="nodeList"]');
     if (!root) return [] as { sub: string; title: string }[];
 
-    const re = new RegExp(`^\\s*(\\d+\\.\\d+\\.\\d+)\\b`);
+    const re = new RegExp(`^\\s*(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(?!\\.\\d|/)\\b`);
     const results: { sub: string; title: string }[] = [];
     const seen = new Set<string>();
 
@@ -831,9 +844,9 @@ async function collectOutlineSubtopics(
   return filterSubtopics(raw);
 }
 
-function mergeSubtopics(a: Subtopic[], b: Subtopic[]): Subtopic[] {
+function mergeSubtopics(a: Subtopic[], b: Subtopic[], section?: string): Subtopic[] {
   const bySub = new Map<string, Subtopic>();
-  for (const s of filterSubtopics([...a, ...b])) {
+  for (const s of filterSubtopics([...a, ...b], section)) {
     if (!bySub.has(s.sub)) bySub.set(s.sub, s);
   }
   return [...bySub.values()].sort((x, y) => {
@@ -864,9 +877,13 @@ export type SaveChapterResult = {
   incomplete?: string;
   /** Se repitió la captura en el sitio porque la primera salió con carga sin terminar. */
   recaptured?: boolean;
+  /** Resultado de la captura de vídeos (si estaba activada). */
+  videos?: VideoCaptureResult;
 };
 
 export type SaveChapterOptions = {
+  /** Activar los reproductores de vídeo y guardarlos (por defecto sí). `false` = --no-videos. */
+  videos?: boolean;
   /** La página ya se desplazó y estabilizó en prepareChapter: no repetir el scroll completo. */
   prescrolled?: boolean;
   /** Re-captura: espera el doble (mínimo y ventana de estabilidad). */
@@ -905,6 +922,8 @@ export async function saveChapterHtml(
   let recaptured = false;
   let firstWhy = '';
   let unfinished: { strong: string[]; weak: string[] } = { strong: [], weak: [] };
+  const wantVideos = saveOpts.videos !== false;
+  let videoCapture: VideoCaptureResult = { ...EMPTY_CAPTURE, notes: [] };
   // Hasta 2 pasadas: si tras serializar aún hay loader/skeleton visible o imágenes
   // pendientes, se espera más (el doble) y se vuelve a capturar UNA vez.
   for (let pass = 0; pass < 2; pass++) {
@@ -915,6 +934,10 @@ export async function saveChapterHtml(
       maxMs: patient ? pol.maxStableMs * 2 : Math.min(pol.maxStableMs, 4000),
       minMs: patient ? pol.minWaitMs : 0,
     });
+    // los reproductores de vídeo son perezosos (solo póster hasta pulsar play): se activan antes de serializar
+    if (pass === 0 && wantVideos) {
+      videoCapture = await captureVideos(page).catch(() => videoCapture);
+    }
     const prev = pass > 0 && data?.ok ? data : null;
     data = await serializeChapterData(page, tabMinMs);
     if (!data.ok) break;
@@ -968,7 +991,11 @@ export async function saveChapterHtml(
     data.sheets = data.sheets.map(fixRef);
   }
 
-  const docHtml = buildStandaloneHtml(data);
+  // subtítulos descargados -> en línea (data:), para que funcionen abriendo el HTML con file://
+  const tracks = await inlineLocalTracks(data.html, siteDir);
+  data.html = tracks.html;
+
+  const docHtml = buildStandaloneHtml(data, wantVideos ? CHAPTER_FORMAT : CHAPTER_FORMAT_NO_VIDEOS);
 
   // Verificación previa a escribir: contenido no vacío, sin spinner/errores.
   const check = verifyChapterHtml(docHtml);
@@ -993,10 +1020,20 @@ export async function saveChapterHtml(
   await writeFile(part, finalHtml, 'utf8');
   await rename(part, filePath);
 
-  let subtopics = filterSubtopics(data.subtopics);
+  // sección real del capítulo (1.3): sale de ?_chapter= (el id de archivo puede ser "1" para 1.1)
+  let section: string | undefined;
+  try {
+    const q = new URL(page.url()).searchParams.get('_chapter') ?? '';
+    if (/^\d+\.\d+$/.test(q)) section = q;
+    else if (/^\d+\.\d+\.1$/.test(q)) section = q.replace(/\.1$/, '');
+  } catch {
+    // sin URL válida
+  }
+  section = section ?? (chapterId ? sectionOfChapter(chapterId) : undefined);
+  let subtopics = filterSubtopics(data.subtopics, section);
   if (chapterId) {
     const fromOutline = await collectOutlineSubtopics(page, chapterId);
-    subtopics = mergeSubtopics(subtopics, fromOutline);
+    subtopics = mergeSubtopics(subtopics, filterSubtopics(fromOutline, section), section);
   }
 
   const warnings = [...check.warnings];
@@ -1025,6 +1062,16 @@ export async function saveChapterHtml(
   if (!incomplete && unfinished.weak.length) {
     warnings.push(`${unfinished.weak.length} contenedor(es) de contenido vacío(s) (${[...new Set(unfinished.weak)].slice(0, 2).join(', ')})`);
   }
+  if (videoCapture.total > 0) {
+    if (videoCapture.pending > 0) {
+      warnings.push(
+        `${videoCapture.pending} de ${videoCapture.total} vídeo(s) sin reproductor offline: ${videoCapture.notes.slice(0, 2).join(' | ') || 'no se pudo activar'}`
+      );
+    }
+  }
+  if (tracks.missing.length) {
+    warnings.push(`${tracks.missing.length} subtítulo(s) descargado(s) no se pudieron incrustar (${tracks.missing.slice(0, 2).join(', ')})`);
+  }
   if (data.tabs.failed > 0) {
     warnings.push(`${data.tabs.failed} pestaña(s) no se pudieron capturar (${data.tabs.captured}/${data.tabs.tabs})`);
   }
@@ -1042,6 +1089,7 @@ export async function saveChapterHtml(
     reused: batch.reused,
     incomplete: incomplete || undefined,
     recaptured,
+    videos: wantVideos ? videoCapture : undefined,
   };
 }
 
@@ -1063,7 +1111,7 @@ function compareChapterIds(a: string, b: string): number {
   return 0;
 }
 
-function parseSubtopicsFromSavedHtml(html: string): Subtopic[] {
+export function parseSubtopicsFromSavedHtml(html: string, chapterId?: string): Subtopic[] {
   const result: Subtopic[] = [];
   const seen = new Set<string>();
   const re = /data-sub="(\d+\.\d+\.\d+)"/g;
@@ -1076,9 +1124,10 @@ function parseSubtopicsFromSavedHtml(html: string): Subtopic[] {
     const tm =
       chunk.match(/class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/i) ??
       chunk.match(/<h[1-6][^>]*>([^<]+)/i);
-    result.push({ sub, title: tm ? tm[1].trim() : sub });
+    result.push({ sub, title: tm ? tm[1].trim() : `Subtema ${sub}` });
   }
-  return filterSubtopics(result).sort((a, b) => compareChapterIds(a.sub, b.sub));
+  const section = chapterId ? sectionOfChapter(chapterId) : undefined;
+  return filterSubtopics(result, section).sort((a, b) => compareChapterIds(a.sub, b.sub));
 }
 
 /** Reconstruye entradas del índice a partir de HTML ya guardados en chapters/. */
@@ -1102,7 +1151,7 @@ export async function entriesFromSavedChapters(
       chapter,
       title,
       file: `chapters/${file}`,
-      subtopics: parseSubtopicsFromSavedHtml(html),
+      subtopics: parseSubtopicsFromSavedHtml(html, chapter),
     });
   }
 
@@ -1128,7 +1177,7 @@ export function buildIndexHtml(
   const first = entries[0]?.file ?? '';
   const links = entries
     .map((e) => {
-      const subs = (e.subtopics ?? [])
+      const subs = filterPlausibleSubtopics(e.subtopics ?? [], sectionOfChapter(e.chapter))
         .map(
           (s) =>
             `<li class="sub"><a href="${e.file}#sub-${escapeHtml(s.sub)}" target="content" data-file="${e.file}">` +

@@ -5,6 +5,7 @@ import { pipeline } from 'stream/promises';
 import { Readable } from 'stream';
 import { dirname, extname, join } from 'path';
 import { mapPool, withRetry } from './util/retry';
+import { ffmpegDownload, isStreamManifestUrl } from './ffmpeg-download';
 
 export const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
@@ -34,6 +35,9 @@ export const DEFAULT_ASSET_OPTIONS: AssetOptions = {
 class PermanentError extends Error {
   permanent = true;
 }
+
+/** La URL resultó ser un manifiesto HLS/DASH (se baja con ffmpeg, no como archivo). */
+class StreamManifestError extends PermanentError {}
 
 const HTML_OK_EXT = new Set(['', '.html', '.htm', '.xhtml', '.php', '.aspx']);
 
@@ -82,6 +86,11 @@ async function fetchOnce(
       throw new PermanentError('devolvió HTML en vez del recurso (¿sesión caducada?)');
     }
 
+    if (/mpegurl|dash\+xml/.test(ct) && /\.(mp4|webm|m4v|mov)$/i.test(dest)) {
+      await res.body.cancel().catch(() => undefined);
+      throw new StreamManifestError('manifiesto de streaming');
+    }
+
     await mkdir(dirname(dest), { recursive: true });
     await pipeline(Readable.fromWeb(res.body as never), createWriteStream(part));
     const size = (await stat(part)).size;
@@ -123,9 +132,13 @@ export async function downloadAsset(
   }
 
   const ext = extname(new URL(absUrl).pathname).toLowerCase();
-  const timeoutMs = /\.(mp4|webm|mov|m4v|zip|pka|pkz|pksz)$/.test(ext)
-    ? opts.timeoutMs * 5
-    : opts.timeoutMs;
+  const destExt = extname(dest).toLowerCase();
+  const isVideo = /^\.(mp4|webm|mov|m4v)$/.test(ext) || /^\.(mp4|webm|mov|m4v)$/.test(destExt);
+  const timeoutMs = isVideo
+    ? opts.timeoutMs * 15 // vídeos: ~11 min por intento
+    : /^\.(zip|pka|pkz|pksz)$/.test(ext)
+      ? opts.timeoutMs * 5
+      : opts.timeoutMs;
   let attempts = 0;
   const attempt = async (url: string) =>
     withRetry(
@@ -144,10 +157,33 @@ export async function downloadAsset(
       }
     );
 
+  // HLS/DASH -> mp4 con ffmpeg
+  const viaFfmpeg = async (url: string): Promise<AssetResult> => {
+    try {
+      const bytes = await withRetry(
+        async () => {
+          attempts++;
+          return ffmpegDownload(url, dest, headers);
+        },
+        {
+          retries: Math.min(opts.retries, 1),
+          baseMs: opts.backoffMs,
+          shouldRetry: (e) => !isPermanent(e),
+          onRetry: (e, n, wait) => opts.log?.(`  · reintento ${n} de ${shortUrl(url)} con ffmpeg en ${wait}ms (${errMsg(e)})`),
+        }
+      );
+      return { ok: true, bytes, attempts };
+    } catch (e) {
+      return { ok: false, error: errMsg(e), attempts };
+    }
+  };
+  if (isStreamManifestUrl(absUrl) && /\.(mp4|webm|m4v|mov)$/i.test(dest)) return viaFfmpeg(absUrl);
+
   try {
     const bytes = await attempt(absUrl);
     return { ok: true, bytes, attempts };
   } catch (e) {
+    if (e instanceof StreamManifestError) return viaFfmpeg(absUrl);
     // El servidor distingue mayúsculas: ciscoSansTT-Thin.woff2 -> ciscosanstt-thin.woff2
     const lower = lowercasePathVariant(absUrl);
     if (lower && /HTTP (404|403)/.test(errMsg(e))) {

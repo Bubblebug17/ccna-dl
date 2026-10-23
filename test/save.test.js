@@ -52,7 +52,7 @@ test('guarda un capítulo: reescribe assets, reintenta, rechaza HTML-en-vez-de-i
 
   assert.ok(res.ok, 'debe verificarse: ' + res.problems.join('; '));
   assert.match(html, /^<!doctype html/i);
-  assert.match(html, /name="ccna-dl-format" content="2"/);
+  assert.match(html, /name="ccna-dl-format" content="3"/);
 
   // assets reescritos y presentes
   assert.ok(!/127\.0\.0\.1:\d+\/img\/ok\.png/.test(html), 'ok.png debería ser local');

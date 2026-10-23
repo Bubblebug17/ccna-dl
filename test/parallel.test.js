@@ -366,7 +366,7 @@ test('reciclado de la pestaña de sesión (una sola pestaña): se vacía sin cer
   assert.ok(logs.filter((l) => /reciclada/.test(l)).length >= 2);
 });
 
-test('medios bloqueados por defecto: el navegador no pide el mp4, Node sí lo descarga, el capítulo se guarda completo', async () => {
+test('con --block-media (opcional) los medios se bloquean: el navegador no pide el mp4, Node sí lo descarga, el capítulo se guarda completo', async () => {
   const page = await newCtxPage();
   await blockUnneededResources(page, MEDIA_PATTERNS);
   fx.resetHits();

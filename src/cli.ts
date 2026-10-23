@@ -164,10 +164,15 @@ const cmd = command({
         'Cada cuántos capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria del navegador ' +
         `(0 = nunca; por defecto ${DEFAULT_RECYCLE_EVERY}). También se recicla antes si el heap de JS es alto o queda poca RAM libre.`,
     }),
-    noBlockMedia: flag({
-      long: 'no-block-media',
+    blockMedia: flag({
+      long: 'block-media',
       description:
-        'No bloquear vídeo/audio (mp4, webm, mp3…) en el navegador. Por defecto se bloquean para ahorrar memoria: los archivos se descargan aparte con Node.',
+        'Bloquea vídeo/audio (mp4, webm, mp3…) en el navegador para ahorrar memoria. Por defecto NO se bloquea, porque los reproductores necesitan cargar el vídeo para poder guardarlo. Con esta opción los vídeos no se pueden capturar (se guarda solo el póster).',
+    }),
+    noVideos: flag({
+      long: 'no-videos',
+      description:
+        'No activar los reproductores de vídeo ni descargar vídeos/subtítulos (solo se guarda el póster). Más rápido y ligero; una ejecución posterior sin esta opción solo repite los capítulos que tienen vídeos.',
     }),
     noBlockTrackers: flag({
       long: 'no-block-trackers',
@@ -231,7 +236,7 @@ const cmd = command({
     });
     const blockPatterns = [
       ...(args.noBlockTrackers ? [] : TRACKER_PATTERNS),
-      ...(args.noBlockMedia ? [] : MEDIA_PATTERNS),
+      ...(args.blockMedia ? MEDIA_PATTERNS : []),
       ...(args.fast ? AGGRESSIVE_PATTERNS : []),
     ];
     // pestañas en paralelo: por defecto min(2, las que caben en la RAM libre); entre 1 y 6
@@ -386,6 +391,7 @@ const cmd = command({
               retries: Math.max(0, Math.floor(args.retries)),
               concurrency: tabs,
               recycleEvery: Math.max(0, Math.floor(args.recycleEvery)),
+              videos: !args.noVideos,
               newPage: newWorkerPage,
               chapterTimeoutMs: Math.max(10, args.chapterTimeout) * 1000,
               signal: abort.signal,

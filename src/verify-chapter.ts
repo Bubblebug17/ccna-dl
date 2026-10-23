@@ -1,8 +1,13 @@
 import { readFile, stat } from 'fs/promises';
 import { dirname, join, normalize } from 'path';
 
-/** Versión del formato de captura. Sube cuando cambie qué se guarda (p. ej. pestañas). */
-export const CHAPTER_FORMAT = 2;
+/**
+ * Versión del formato de captura. Sube cuando cambie qué se guarda (p. ej. pestañas).
+ * 3 = los vídeos se activan y se guardan (<video> + subtítulos); 2 = pestañas completas, sin vídeos.
+ */
+export const CHAPTER_FORMAT = 3;
+/** Formato de los capítulos guardados sin activar vídeos (--no-videos). */
+export const CHAPTER_FORMAT_NO_VIDEOS = 2;
 export const FORMAT_META_RE = /<meta name="ccna-dl-format" content="(\d+)"/i;
 
 export type VerifyResult = {
@@ -15,6 +20,8 @@ export type VerifyResult = {
   bytes: number;
   textLength: number;
   localRefs: number;
+  /** Reproductores que solo tienen póster + botón play (no se pueden reproducir sin conexión). */
+  videosPending: number;
 };
 
 const ERROR_RE =
@@ -39,6 +46,25 @@ export function localAssetRefs(html: string): string[] {
     out.add(m[1].replace(/[.,;]+$/, ''));
   }
   return [...out];
+}
+
+/** Botones "play" grandes de video.js que no tienen un <video> propio (reproductor sin activar). */
+export function countPendingVideos(html: string): number {
+  const markup = html.replace(/<script\b[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
+  const buttons = (markup.match(/\bvjs-big-play-button\b/g) || []).length;
+  const videos = (markup.match(/<video\b/gi) || []).length;
+  return Math.max(0, buttons - videos);
+}
+
+/**
+ * ¿Un capítulo ya guardado se puede omitir al reanudar? Los guardados con el formato 2 (antes de capturar
+ * vídeos) solo se repiten si tienen vídeos sin activar: así no se vuelve a bajar todo el curso.
+ */
+export function chapterUpToDate(v: { ok: boolean; format: number; videosPending: number }, wantVideos: boolean): boolean {
+  if (!v.ok) return false;
+  if (!wantVideos) return v.format >= CHAPTER_FORMAT_NO_VIDEOS;
+  if (v.format >= CHAPTER_FORMAT) return true; // ya se intentó activar los vídeos (si no se pudo, avisa; no se repite en bucle)
+  return v.format >= CHAPTER_FORMAT_NO_VIDEOS && v.videosPending === 0;
 }
 
 /** Comprobaciones puras sobre el HTML (sin disco). */
@@ -66,13 +92,19 @@ export function verifyChapterHtml(html: string): Omit<VerifyResult, 'localRefs'>
   const loading = text.match(/\b(cargando|loading)\b\.{0,3}/i);
   if (loading && text.length < 600) problems.push(`solo muestra "${loading[0]}" (contenido sin cargar)`);
 
+  // vídeos: reproductor perezoso sin activar = solo póster
+  const videosPending = countPendingVideos(html);
+  if (videosPending > 0) {
+    warnings.push(`${videosPending} vídeo(s) sin reproductor offline (solo póster y botón de play)`);
+  }
+
   // pestañas: todas deben tener su panel
   const markup = html.replace(/<script\b[\s\S]*?<\/script>/gi, ' ');
   const tabs = (markup.match(/role="tab"/g) || []).length;
   const panels = (markup.match(/role="tabpanel"/g) || []).length;
   if (tabs > panels) warnings.push(`pestañas sin panel guardado: ${tabs} pestañas, ${panels} paneles`);
 
-  return { ok: problems.length === 0, problems, warnings, format, bytes, textLength: text.length, refs: localAssetRefs(html) };
+  return { ok: problems.length === 0, problems, warnings, format, bytes, textLength: text.length, refs: localAssetRefs(html), videosPending };
 }
 
 /** Verifica un capítulo ya guardado: contenido + que todos los assets referenciados existan y no estén vacíos. */
@@ -93,6 +125,7 @@ export async function verifyChapterFile(
       bytes: 0,
       textLength: 0,
       localRefs: 0,
+      videosPending: 0,
     };
   }
   const v = verifyChapterHtml(html);
@@ -135,6 +168,7 @@ export async function verifyChapterFile(
     bytes: v.bytes,
     textLength: v.textLength,
     localRefs: v.refs.length,
+    videosPending: v.videosPending,
   };
 }
 

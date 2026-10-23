@@ -1,6 +1,7 @@
 import { HTTPResponse, Page } from 'puppeteer';
 import * as cliProgress from 'cli-progress';
 import { urlToChapter } from './url-to-chapter-id';
+import { dropShadowedSubchapters } from './chapter-ids';
 import { waitForSpinners } from './wait-for-spinners';
 import { delay } from './util/promise';
 import { restoreLaunchCurriculumPage } from './wait-for-chapter-content';
@@ -408,6 +409,17 @@ async function getLaunchChapterUrls(
         'No se encontraron secciones numeradas (p.ej. 1.1, 1.2) en el outline. ' +
           `Muestra: ${sample.slice(0, 8).join(' | ') || '(vacío)'}`
       );
+    }
+
+    // "2.2.1 Prueba..." es un sub-elemento de la sección 2.2, no un capítulo: su id de archivo
+    // coincidiría con "2.2" y la sobrescribiría.
+    const shadow = dropShadowedSubchapters(entries);
+    if (shadow.dropped.length) {
+      console.warn(
+        `  · ${shadow.dropped.length} elemento(s) del outline ignorados por ser sub-elementos de una sección existente: ` +
+          `${shadow.dropped.map((e) => e.chapter).slice(0, 10).join(', ')}${shadow.dropped.length > 10 ? '…' : ''}`
+      );
+      entries = shadow.kept;
     }
 
     const baseUrl = page.url();

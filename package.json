@@ -7,7 +7,7 @@
     "start": "node ./lib/cli.js",
     "deploy": "npm run build && npm start",
     "validate": "node scripts/validate-download.js",
-    "test": "npm run build && node --test --test-timeout=600000 test/unit.test.js test/save.test.js test/parallel.test.js",
+    "test": "npm run build && node --test --test-timeout=600000 test/unit.test.js test/subtopics.test.js test/save.test.js test/video.test.js test/parallel.test.js",
     "dev": "export NODE_ENV=development || set NODE_ENV=development&& npx ts-node-dev --inspect=9229 --respawn ./src/cli.ts",
     "prepack": "npm run build",
     "ncu": "npx ncu -u -x @types/inquirer -x inquirer"
