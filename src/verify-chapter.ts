@@ -22,6 +22,10 @@ export type VerifyResult = {
   localRefs: number;
   /** Reproductores que solo tienen póster + botón play (no se pueden reproducir sin conexión). */
   videosPending: number;
+  /** Componentes de animación (adobe-animate-view…) sin grabación offline: el canvas sale vacío al abrir el HTML. */
+  animationsPending?: number;
+  /** El capítulo se guardó intentando grabar las animaciones (meta ccna-dl-anim). */
+  animAttempted?: boolean;
 };
 
 const ERROR_RE =
@@ -57,11 +61,31 @@ export function countPendingVideos(html: string): number {
 }
 
 /**
+ * Animaciones interactivas (canvas que dibuja el JS del reproductor + controles play/deslizador) sin grabación:
+ * hay un componente `adobe-animate-view` (o un `aa-scrubber`) y nada marcado con data-ccna-anim-src.
+ */
+export function countPendingAnimations(html: string): number {
+  const markup = html.replace(/<script\b[\s\S]*?<\/script>/gi, ' ').replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
+  const views = (markup.match(/<adobe-animate-view\b/gi) || []).length;
+  const scrubbers = (markup.match(/<aa-scrubber\b/gi) || []).length;
+  const done = (markup.match(/\bdata-ccna-anim-src=/gi) || []).length;
+  return Math.max(0, Math.max(views, scrubbers) - done);
+}
+
+export const ANIM_ATTEMPT_RE = /<meta name="ccna-dl-anim"/i;
+
+/**
  * ¿Un capítulo ya guardado se puede omitir al reanudar? Los guardados con el formato 2 (antes de capturar
  * vídeos) solo se repiten si tienen vídeos sin activar: así no se vuelve a bajar todo el curso.
  */
-export function chapterUpToDate(v: { ok: boolean; format: number; videosPending: number }, wantVideos: boolean): boolean {
+export function chapterUpToDate(
+  v: { ok: boolean; format: number; videosPending: number; animationsPending?: number; animAttempted?: boolean },
+  wantVideos: boolean,
+  wantAnimations = true
+): boolean {
   if (!v.ok) return false;
+  // animaciones sin grabar: se repite el capítulo salvo que ya se intentara (si no se pudo, avisa; no se repite en bucle)
+  if (wantAnimations && (v.animationsPending ?? 0) > 0 && !v.animAttempted) return false;
   if (!wantVideos) return v.format >= CHAPTER_FORMAT_NO_VIDEOS;
   if (v.format >= CHAPTER_FORMAT) return true; // ya se intentó activar los vídeos (si no se pudo, avisa; no se repite en bucle)
   return v.format >= CHAPTER_FORMAT_NO_VIDEOS && v.videosPending === 0;
@@ -98,13 +122,19 @@ export function verifyChapterHtml(html: string): Omit<VerifyResult, 'localRefs'>
     warnings.push(`${videosPending} vídeo(s) sin reproductor offline (solo póster y botón de play)`);
   }
 
+  // animaciones: canvas dibujado por JS sin grabación offline
+  const animationsPending = countPendingAnimations(html);
+  if (animationsPending > 0) {
+    warnings.push(`${animationsPending} animación(es) sin recursos locales (canvas vacío: el reproductor original no se guarda)`);
+  }
+
   // pestañas: todas deben tener su panel
   const markup = html.replace(/<script\b[\s\S]*?<\/script>/gi, ' ');
   const tabs = (markup.match(/role="tab"/g) || []).length;
   const panels = (markup.match(/role="tabpanel"/g) || []).length;
   if (tabs > panels) warnings.push(`pestañas sin panel guardado: ${tabs} pestañas, ${panels} paneles`);
 
-  return { ok: problems.length === 0, problems, warnings, format, bytes, textLength: text.length, refs: localAssetRefs(html), videosPending };
+  return { ok: problems.length === 0, problems, warnings, format, bytes, textLength: text.length, refs: localAssetRefs(html), videosPending, animationsPending, animAttempted: ANIM_ATTEMPT_RE.test(html) };
 }
 
 /** Verifica un capítulo ya guardado: contenido + que todos los assets referenciados existan y no estén vacíos. */
@@ -126,6 +156,8 @@ export async function verifyChapterFile(
       textLength: 0,
       localRefs: 0,
       videosPending: 0,
+      animationsPending: 0,
+      animAttempted: false,
     };
   }
   const v = verifyChapterHtml(html);
@@ -169,6 +201,8 @@ export async function verifyChapterFile(
     textLength: v.textLength,
     localRefs: v.refs.length,
     videosPending: v.videosPending,
+    animationsPending: v.animationsPending,
+    animAttempted: v.animAttempted,
   };
 }
 

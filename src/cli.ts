@@ -190,6 +190,16 @@ const cmd = command({
       description:
         'No activar los reproductores de vídeo ni descargar vídeos/subtítulos (solo se guarda el póster). Más rápido y ligero; una ejecución posterior sin esta opción solo repite los capítulos que tienen vídeos.',
     }),
+    noAnimations: flag({
+      long: 'no-animations',
+      description:
+        'No grabar las animaciones interactivas (Adobe Animate/CreateJS: canvas con botón play y barra). Por defecto se pulsa play y se graba cada una en un webm para verla sin conexión.',
+    }),
+    dumpNetwork: flag({
+      long: 'dump-network',
+      description:
+        'Diagnóstico: guarda <curso>/debug-red-<capítulo>.json con las peticiones de red del capítulo y los componentes de animación detectados (sin cookies, cabeceras ni tokens). Úsalo con --only para un capítulo.',
+    }),
     noBlockTrackers: flag({
       long: 'no-block-trackers',
       description:
@@ -461,6 +471,8 @@ const cmd = command({
               concurrency: tabs,
               recycleEvery: Math.max(0, Math.floor(args.recycleEvery)),
               videos: !args.noVideos,
+              animations: !args.noAnimations,
+              dumpNetwork: args.dumpNetwork,
               newPage: newWorkerPage,
               chapterTimeoutMs: Math.max(10, args.chapterTimeout) * 1000,
               signal: abort.signal,

@@ -73,6 +73,12 @@ export type SaveCourseOptions = {
   freeMemMb?: () => number;
   /** Activa los reproductores de vídeo y guarda vídeo + subtítulos (por defecto sí; false = --no-videos). */
   videos?: boolean;
+  /** Graba las animaciones interactivas (canvas + play + deslizador) para verlas sin conexión (por defecto sí; false = --no-animations). */
+  animations?: boolean;
+  /** Guarda `debug-red-<capítulo>.json` por capítulo (peticiones sin cookies/tokens + componentes detectados). */
+  dumpNetwork?: boolean;
+  /** Tiempo máximo de grabación por animación (ms). */
+  animationMaxMs?: number;
 };
 
 export type SaveCourseResult = {
@@ -195,6 +201,7 @@ export async function saveLaunchCourseSite(
   // ---- reanudación: se verifican en paralelo los capítulos ya guardados ----
   const queue: number[] = [];
   const wantVideos = opts.videos !== false;
+  const wantAnimations = opts.animations !== false;
   if (opts.resume && !opts.retryFailed) {
     const checks = await mapPool(todo, 8, async (u) =>
       verifyChapterFile(join(chaptersDir, chapterFileName(chapterIdFromUrl(u))), siteDir)
@@ -203,7 +210,7 @@ export async function saveLaunchCourseSite(
       const chapter = chapterIdFromUrl(todo[idx]);
       const c = checks[idx];
       const v = c.ok ? c.value : undefined;
-      if (v && chapterUpToDate(v, wantVideos)) {
+      if (v && chapterUpToDate(v, wantVideos, wantAnimations)) {
         log(`${tag(idx)} · omitido (ya guardado y verificado)`);
         outcomes[idx] = { chapter, url: todo[idx], status: 'omitido' };
         progress.tick();
@@ -214,7 +221,9 @@ export async function saveLaunchCourseSite(
           ? v.problems[0]
           : v.format >= 2 && v.videosPending > 0
             ? `${v.videosPending} vídeo(s) sin reproductor offline (se activarán y descargarán)`
-            : `formato antiguo (v${v.format}, faltan pestañas/fuentes)`;
+            : wantAnimations && (v.animationsPending ?? 0) > 0
+              ? `${v.animationsPending} animación(es) sin recursos locales (se grabarán)`
+              : `formato antiguo (v${v.format}, faltan pestañas/fuentes)`;
         log(`${tag(idx)} · se vuelve a descargar: ${why}`);
       }
       queue.push(idx);
@@ -284,6 +293,9 @@ export async function saveLaunchCourseSite(
             let r = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
               prescrolled: !!opts.prepareScrolls,
               videos: wantVideos,
+              animations: wantAnimations,
+              dumpNetwork: opts.dumpNetwork,
+              animationMaxMs: opts.animationMaxMs,
             });
             // Carga sin terminar al guardar (loader/skeleton visible): recarga y re-captura UNA vez, con más paciencia.
             if (r.ok && r.incomplete && !fullRecapture) {
@@ -293,6 +305,9 @@ export async function saveLaunchCourseSite(
               const r2 = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
                 prescrolled: !!opts.prepareScrolls,
                 videos: wantVideos,
+                animations: wantAnimations,
+                dumpNetwork: opts.dumpNetwork,
+                animationMaxMs: opts.animationMaxMs,
                 patient: true,
               });
               if (r2.ok) r = { ...r2, recaptured: true };

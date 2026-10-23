@@ -92,6 +92,7 @@ function createFixture(opts = {}) {
   const sticky = q.get('sticky') === '1';
   const heavy = q.get('heavy') === '1';
   const video = q.get('video') || ''; // 'mp4' | 'hls' | 'none' (el reproductor nunca monta el <video>)
+  const anim = q.get('anim') || ''; // 'ok' | 'dead' (el botón play no arranca nada): <adobe-animate-view> como el de Netacad
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Capítulo ${n}</title>
 <link rel="stylesheet" href="/css/style.css">
@@ -114,6 +115,7 @@ ${clean ? '' : `<img id="fakehtml" src="/img/fakehtml.png" alt="fakehtml">`}
 ${video ? '<media-view></media-view>' : ''}
 <a id="pka" role="button" href="/assets/files/lab_a_es-xl.pka">Laboratorio PT</a>
 <img id="uniq" src="/img/u${n}.png" alt="unico">
+${anim ? '<adobe-animate-view></adobe-animate-view>' : ''}
 <x-lazy></x-lazy>
 <x-widget></x-widget>
 <script>fetch('/blocked-tracker/t.js').catch(function(){});</script>
@@ -162,6 +164,77 @@ ${video ? `<script>
   }
   customElements.define('media-view', MediaView);
 </script>` : ''}
+${anim ? `<script>
+  // Animación tipo Adobe Animate de Netacad: <adobe-animate-view> con un <canvas> VACÍO hasta pulsar play,
+  // textos HTML que anima el JS (opacity inline), y controles <play-pause> + <aa-scrubber> (custom elements con
+  // Shadow DOM). Al pulsar play se piden datos (json + png) con fetch y se dibuja con requestAnimationFrame.
+  class PlayPause extends HTMLElement {
+    connectedCallback() {
+      const r = this.attachShadow({ mode: 'open' });
+      r.innerHTML = '<button type="button" aria-label="Play"><span class="material-icon">play_circle_filled</span></button>';
+      r.querySelector('button').addEventListener('click', () => this.dispatchEvent(new CustomEvent('toggle', { bubbles: true, composed: true })));
+    }
+    set playing(on) {
+      if (on) this.removeAttribute('paused'); else this.setAttribute('paused', '');
+      this.shadowRoot.querySelector('.material-icon').textContent = on ? 'pause_circle_filled' : 'play_circle_filled';
+    }
+  }
+  class AaScrubber extends HTMLElement {
+    connectedCallback() {
+      const r = this.attachShadow({ mode: 'open' });
+      r.innerHTML = '<input type="range" min="0" max="462" step="1" value="0">';
+    }
+    get input() { return this.shadowRoot.querySelector('input'); }
+  }
+  class AdobeAnimateView extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<div dir="ltr" tabindex="0" role="figure" class="adobe-animate-container">' +
+        '<div class="spacer"><div class="canvas-text-wrapper" style="position:relative;width:480px;height:320px">' +
+        '<canvas width="480" height="320" style="position:absolute;left:0;top:0;z-index:0"></canvas>' +
+        '<div id="dynamic-text" style="position:absolute;left:0;top:0;z-index:1;width:480px;height:320px">' +
+        '<div id="t-dr" style="position:absolute;left:30px;top:20px;opacity:0">DR</div>' +
+        '<div id="t-bdr" style="position:absolute;left:30px;top:60px;opacity:0">BDR</div>' +
+        '</div></div></div>' +
+        '<div class="player-controls"><play-pause paused=""></play-pause><aa-scrubber id="slider-custom-styles"></aa-scrubber></div></div>';
+      const cv = root.querySelector('canvas'), pp = root.querySelector('play-pause'), sc = root.querySelector('aa-scrubber');
+      const ctx = cv.getContext('2d');
+      let data = null, img = null, t = 0, playing = false, last = 0;
+      const draw = (p) => {
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, 480, 320);
+        ctx.fillStyle = p < 0.5 ? '#dd2222' : '#2222dd';
+        ctx.fillRect(40 + p * 300, 120, 80, 80);
+        if (img) ctx.drawImage(img, 10, 250, 20, 20);
+        root.getElementById('t-dr').style.opacity = String(Math.min(1, p * 4));
+        root.getElementById('t-bdr').style.opacity = p > 0.5 ? '1' : '0';
+        root.getElementById('t-bdr').textContent = p > 0.8 ? 'BDR listo' : 'BDR';
+        sc.input.value = String(Math.round(p * 462));
+      };
+      const tick = (now) => {
+        if (!playing) return;
+        t += now - last; last = now;
+        const p = Math.min(1, t / data.durationMs);
+        draw(p);
+        if (p >= 1) { playing = false; pp.playing = false; return; }
+        requestAnimationFrame(tick);
+      };
+      root.addEventListener('toggle', async () => {
+        if ('${anim}' === 'dead') return;
+        if (playing) { playing = false; pp.playing = false; return; }
+        if (!data) {
+          data = await (await fetch('/anim/data.json?token=SECRETVALUE123')).json();
+          img = await new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = '/anim/sprite.png'; });
+        }
+        if (t >= data.durationMs) t = 0;
+        playing = true; pp.playing = true; last = performance.now();
+        requestAnimationFrame(tick);
+      });
+    }
+  }
+  customElements.define('play-pause', PlayPause);
+  customElements.define('aa-scrubber', AaScrubber);
+  customElements.define('adobe-animate-view', AdobeAnimateView);
+</script>` : ''}
 <script>
   class XWidget extends HTMLElement {
     connectedCallback() {
@@ -207,7 +280,7 @@ ${video ? `<script>
     const lp = path === '/launch' ? url.searchParams : null;
     if (lp) {
       const n = (lp.get('_chapter') || '1.1.1').split('.')[0];
-      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
+      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video', 'anim'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
       return send(200, 'text/html', `<!doctype html><html><head><title>Launch ${n}</title></head><body><main id="main-content"><h1>Curso de prueba</h1><iframe src="/authoring-resources/ch${n}.html${extra ? '?' + extra : ''}" style="width:1000px;height:900px;border:0"></iframe></main></body></html>`);
     }
     const m = path.match(/^\/launch(\d+)\.html$/);
@@ -225,6 +298,8 @@ ${video ? `<script>
     if (/^\/img\/big(\d+)\.png$/.test(path)) return send(200, 'image/png', bigImg(Number(path.match(/(\d+)/)[1])));
     if (/^\/media\/clip\d+\.mp4$/.test(path)) return send(200, 'video/mp4', Buffer.alloc(6 * 1024 * 1024, 3));
     if (path === '/media/signed/abc123') return makeMedia().ok ? send(200, 'video/mp4', makeMedia().mp4) : send(404, 'text/plain', 'sin ffmpeg');
+    if (path === '/anim/data.json') return send(200, 'application/json', JSON.stringify({ durationMs: 3000 }));
+    if (path === '/anim/sprite.png') return send(200, 'image/png', PNG);
     if (path === '/media/sub.vtt') return send(200, 'text/vtt', VTT);
     if (path === '/hls/index.m3u8') return makeMedia().ok ? send(200, 'application/vnd.apple.mpegurl', makeMedia().m3u8) : send(404, 'text/plain', 'sin ffmpeg');
     if (/^\/hls\/seg\d+\.ts$/.test(path) && makeMedia().ok) {

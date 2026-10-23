@@ -213,6 +213,7 @@ function analyzeHtml(html) {
     absoluteInText: [],
     badFragmentRefs: 0,
     video: { bigPlay: 0, videos: 0, offline: 0, tracks: 0 },
+    anim: { views: 0, scrubbers: 0, offline: 0, attempted: false },
   };
 
   const tm = /<title>([^<]*)<\/title>/i.exec(html);
@@ -261,7 +262,7 @@ function analyzeHtml(html) {
     } else if (tag === 'object') {
       add('object', a.data);
     }
-    for (const k of ['data-pdf', 'data-href', 'data-src', 'data-url', 'data-download']) if (a[k]) add(k, a[k]);
+    for (const k of ['data-pdf', 'data-href', 'data-src', 'data-url', 'data-download', 'data-ccna-anim-src']) if (a[k]) add(k, a[k]);
     if (a.poster && tag !== 'video') add('poster', a.poster);
     if (a.style && a.style.includes('url(')) for (const u of cssRefs(decodeEntities(a.style))) info.refs.push({ kind: 'style-attr', url: u });
 
@@ -270,6 +271,11 @@ function analyzeHtml(html) {
       if ('data-ccna-media' in a) info.video.offline++;
     }
     if (tag === 'track') info.video.tracks++;
+    // animaciones interactivas (<adobe-animate-view>: canvas pintado por JS): offline solo si hay grabación local
+    if (tag === 'adobe-animate-view') info.anim.views++;
+    if (tag === 'aa-scrubber') info.anim.scrubbers++;
+    if ('data-ccna-anim-src' in a) info.anim.offline++;
+    if (tag === 'meta' && a.name === 'ccna-dl-anim') info.anim.attempted = true;
     // señales de "cargando"
     const cls = (a.class || '').toLowerCase();
     const inlineHidden = /display\s*:\s*none|visibility\s*:\s*hidden/i.test(a.style || '') || 'hidden' in a || a['aria-hidden'] === 'true';
@@ -653,6 +659,15 @@ function validateCourse(courseDir, opt) {
     chap.videos = { total: a.video.videos + pendingVideos, offline: a.video.offline, pending: pendingVideos, tracks: a.video.tracks };
     if (pendingVideos)
       chap.warnings.push(pendingVideos + ' vídeo(s) sin reproductor offline (solo póster + botón de play; no hay <video> ni fuente guardada). Vuelva a descargar este capítulo.');
+    // animaciones interactivas (canvas dibujado en tiempo real por un reproductor JS que no se guarda)
+    const animTotal = Math.max(a.anim.views, a.anim.scrubbers);
+    const pendingAnims = Math.max(0, animTotal - a.anim.offline);
+    chap.animations = { total: animTotal, offline: a.anim.offline, pending: pendingAnims, attempted: a.anim.attempted };
+    if (pendingAnims)
+      chap.warnings.push(
+        pendingAnims + ' animación(es) sin recursos locales (canvas vacío offline: el reproductor y sus datos no se guardan' +
+          (a.anim.attempted ? '; ya se intentó grabar, revise debug-red-<cap>.json con --dump-network' : '; vuelva a descargar este capítulo') + ').'
+      );
     if (a.title && titles.has(a.title)) chap.warnings.push('mismo <title> que ' + titles.get(a.title));
     if (a.title) titles.set(a.title, chap.file);
     if (a.title && !/\|/.test(a.title)) chap.notes.push('título sin prefijo de módulo: "' + a.title.slice(0, 60) + '"');

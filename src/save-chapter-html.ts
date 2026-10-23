@@ -11,6 +11,7 @@ import {
 } from './download-assets';
 import { CHAPTER_FORMAT, CHAPTER_FORMAT_NO_VIDEOS, verifyChapterHtml } from './verify-chapter';
 import { captureVideos, EMPTY_CAPTURE, VideoCaptureResult } from './capture-videos';
+import { captureAnimations, AnimationCaptureResult, EMPTY_ANIMATIONS, ANIM_META, sanitizeUrl } from './capture-animations';
 import { inlineLocalTracks } from './inline-vtt';
 import { filterPlausibleSubtopics, sectionOfChapter } from './subtopics';
 import sanitize = require('sanitize-filename');
@@ -603,7 +604,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
   }, tabMinMs);
 }
 
-function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT): string {
+function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT, anim = false): string {
   const sheetsJson = JSON.stringify(data.sheets).replace(/<\//g, '<\\/');
 
   const loader = `
@@ -771,9 +772,122 @@ function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT)
     });
   }
 
+
+  // Animaciones (Adobe Animate/CreateJS, canvas con línea de tiempo): el descargador grabó la animación en un
+  // webm (data-ccna-anim-src) y la línea de tiempo de los textos (data-ccna-anim-tl). El canvas vacío se
+  // sustituye por un elemento video y los controles originales (sin JS) por unos propios.
+  function fixAnimations() {
+    allRoots().forEach(function (root) {
+      root.querySelectorAll('[data-ccna-anim-src]').forEach(function (box) {
+        if (box.dataset.ccnaAnimDone) return;
+        var canvas = box.querySelector('canvas');
+        if (!canvas) return;
+        box.dataset.ccnaAnimDone = '1';
+        var tl = {};
+        try { tl = JSON.parse(box.getAttribute('data-ccna-anim-tl') || '{}'); } catch (e) {}
+        var ovs = tl.ov || {};
+        var keys = Object.keys(ovs);
+        var els = {};
+        keys.forEach(function (k) { els[k] = box.querySelector('[data-ccna-ov="' + k + '"]'); });
+
+        var cs = getComputedStyle(canvas);
+        var v = document.createElement('video');
+        v.setAttribute('playsinline', '');
+        v.setAttribute('preload', 'auto');
+        v.setAttribute('data-ccna-anim-video', '1');
+        v.src = box.getAttribute('data-ccna-anim-src');
+        var w = canvas.width || +box.getAttribute('data-ccna-anim-w') || 900;
+        var h = canvas.height || +box.getAttribute('data-ccna-anim-h') || 600;
+        v.width = w; v.height = h;
+        v.style.width = cs.width && cs.width !== 'auto' ? cs.width : w + 'px';
+        v.style.height = cs.height && cs.height !== 'auto' ? cs.height : h + 'px';
+        v.style.maxWidth = '100%';
+        v.style.objectFit = 'fill';
+        v.style.background = '#fff';
+        if (cs.position !== 'static') {
+          v.style.position = cs.position; v.style.top = cs.top; v.style.left = cs.left;
+        }
+        if (cs.zIndex !== 'auto') v.style.zIndex = cs.zIndex;
+        v.style.display = cs.display === 'none' ? 'block' : cs.display;
+        canvas.parentNode.insertBefore(v, canvas);
+        canvas.style.display = 'none';
+
+        // controles propios
+        var ctl = box.querySelectorAll('[data-ccna-anim-ctl]');
+        var anchor = ctl.length ? ctl[0] : null;
+        ctl.forEach(function (c) { c.style.display = 'none'; });
+        var bar = document.createElement('div');
+        bar.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 10px;font:14px sans-serif;position:relative;z-index:5';
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.setAttribute('aria-label', 'Reproducir / pausar');
+        btn.style.cssText = 'width:36px;height:36px;border-radius:50%;border:0;background:#049fd9;color:#fff;font-size:15px;cursor:pointer;flex:none';
+        var bar_range = document.createElement('input');
+        bar_range.type = 'range'; bar_range.min = '0'; bar_range.max = '1000'; bar_range.step = '1'; bar_range.value = '0';
+        bar_range.setAttribute('aria-label', 'Posición de la animación');
+        bar_range.style.cssText = 'flex:1;accent-color:#fbab18;cursor:pointer';
+        var time = document.createElement('span');
+        time.style.cssText = 'min-width:84px;text-align:right;color:#555';
+        bar.appendChild(btn); bar.appendChild(bar_range); bar.appendChild(time);
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(bar, anchor);
+        else box.appendChild(bar);
+
+        function dur() { return isFinite(v.duration) && v.duration > 0 ? v.duration : (tl.d || 0) / 1000; }
+        function fmt(sec) { sec = Math.max(0, Math.round(sec)); return Math.floor(sec / 60) + ':' + ('0' + (sec % 60)).slice(-2); }
+        function applyOverlays(ms) {
+          keys.forEach(function (k) {
+            var el = els[k], ev = ovs[k];
+            if (!el || !ev || !ev.length) return;
+            var lo = 0, hi = ev.length - 1, idx = -1;
+            while (lo <= hi) { var mid = (lo + hi) >> 1; if (ev[mid][0] <= ms) { idx = mid; lo = mid + 1; } else hi = mid - 1; }
+            if (idx < 0) idx = 0;
+            if (el.__ccnaIdx === idx) return;
+            el.__ccnaIdx = idx;
+            var e = ev[idx];
+            if (e[1]) el.setAttribute('style', e[1]); else el.removeAttribute('style');
+            if (e[2]) el.setAttribute('class', e[2]); else el.removeAttribute('class');
+            if (e[3] !== null && e[3] !== undefined && el.children.length === 0 && el.textContent !== e[3]) el.textContent = e[3];
+          });
+        }
+        function sync() {
+          var d = dur();
+          applyOverlays(v.currentTime * 1000);
+          if (d > 0 && document.activeElement !== bar_range) bar_range.value = String(Math.round(Math.min(1, v.currentTime / d) * 1000));
+          time.textContent = fmt(v.currentTime) + ' / ' + fmt(d);
+          btn.textContent = v.paused || v.ended ? '\u25B6' : '\u275A\u275A';
+        }
+        var raf = 0;
+        function loop() { sync(); if (!v.paused && !v.ended) raf = requestAnimationFrame(loop); }
+        v.addEventListener('play', function () { cancelAnimationFrame(raf); loop(); });
+        ['pause', 'ended', 'seeked', 'timeupdate', 'loadedmetadata', 'durationchange'].forEach(function (n) { v.addEventListener(n, sync); });
+        v.addEventListener('loadedmetadata', function () {
+          // los webm de MediaRecorder no traen duración: se fuerza su cálculo
+          if (v.duration === Infinity) {
+            var back = function () { v.removeEventListener('timeupdate', back); v.currentTime = 0; sync(); };
+            v.addEventListener('timeupdate', back);
+            v.currentTime = 1e101;
+          }
+        });
+        btn.addEventListener('click', function () {
+          if (v.paused || v.ended) {
+            if (v.ended || (dur() > 0 && v.currentTime >= dur() - 0.05)) v.currentTime = 0;
+            var pr = v.play(); if (pr && pr.catch) pr.catch(function () {});
+          } else v.pause();
+        });
+        bar_range.addEventListener('input', function () {
+          var d = dur();
+          if (d > 0) { v.currentTime = (+bar_range.value / 1000) * d; sync(); }
+        });
+        applyOverlays(0);
+        sync();
+      });
+    });
+  }
+
   function run() {
     try { fixTabs(); } catch (e) {}
     try { fixVideos(); } catch (e) {}
+    try { fixAnimations(); } catch (e) { console.error('animaciones', e); }
     try { fixTranscripts(); } catch (e) {}
     try { fixPdfButtons(); } catch (e) {}
     try { scrollToHash(); } catch (e) {}
@@ -789,7 +903,7 @@ function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT)
 </script>`;
 
   let inner = data.html;
-  const meta = `<meta name="ccna-dl-format" content="${format}">`;
+  const meta = `<meta name="ccna-dl-format" content="${format}">` + (anim ? `<meta name="${ANIM_META}" content="1">` : '');
   if (/<head[^>]*>/i.test(inner)) {
     inner = inner.replace(/<head[^>]*>/i, (m) => m + meta);
   } else {
@@ -879,11 +993,19 @@ export type SaveChapterResult = {
   recaptured?: boolean;
   /** Resultado de la captura de vídeos (si estaba activada). */
   videos?: VideoCaptureResult;
+  /** Resultado de la captura de animaciones (si estaba activada). */
+  animations?: AnimationCaptureResult;
 };
 
 export type SaveChapterOptions = {
   /** Activar los reproductores de vídeo y guardarlos (por defecto sí). `false` = --no-videos. */
   videos?: boolean;
+  /** Grabar las animaciones interactivas (canvas + play + deslizador) para verlas sin conexión (por defecto sí). */
+  animations?: boolean;
+  /** Guarda `debug-red-<capítulo>.json` (peticiones de red sin cookies/tokens y componentes detectados) para diagnosticar. */
+  dumpNetwork?: boolean;
+  /** Tiempo máximo de grabación por animación (ms). */
+  animationMaxMs?: number;
   /** La página ya se desplazó y estabilizó en prepareChapter: no repetir el scroll completo. */
   prescrolled?: boolean;
   /** Re-captura: espera el doble (mínimo y ventana de estabilidad). */
@@ -892,6 +1014,8 @@ export type SaveChapterOptions = {
 
 /** Marca de captura con carga sin terminar (el modo reanudar la vuelve a descargar). */
 export const INCOMPLETE_META = 'ccna-dl-incomplete';
+
+const NET_LISTENERS = new WeakMap<Page, (res: import('puppeteer').HTTPResponse) => void>();
 
 export async function saveChapterHtml(
   page: Page,
@@ -924,6 +1048,55 @@ export async function saveChapterHtml(
   let unfinished: { strong: string[]; weak: string[] } = { strong: [], weak: [] };
   const wantVideos = saveOpts.videos !== false;
   let videoCapture: VideoCaptureResult = { ...EMPTY_CAPTURE, notes: [] };
+  const wantAnimations = saveOpts.animations !== false;
+  let animCapture: AnimationCaptureResult = { ...EMPTY_ANIMATIONS, notes: [], components: [], network: [] };
+  // peticiones de red de toda la captura del capítulo (solo con --dump-network)
+  const netLog: Array<Record<string, unknown>> = [];
+  const onNetResponse = (res: import('puppeteer').HTTPResponse) => {
+    if (netLog.length >= 1500) return;
+    try {
+      netLog.push({ status: res.status(), method: res.request().method(), resource: res.request().resourceType(), type: (res.headers()['content-type'] || '').split(';')[0], url: sanitizeUrl(res.url()) });
+    } catch {
+      // sin cabeceras
+    }
+  };
+  if (saveOpts.dumpNetwork) {
+    // si una captura anterior de esta pestaña terminó con error, no deja su escucha puesta
+    const prevL = NET_LISTENERS.get(page);
+    if (prevL) page.off('response', prevL);
+    NET_LISTENERS.set(page, onNetResponse);
+    page.on('response', onNetResponse);
+  }
+  const writeNetDump = async (outcome: string) => {
+    if (!saveOpts.dumpNetwork) return;
+    page.off('response', onNetResponse);
+    try {
+      await mkdir(siteDir, { recursive: true });
+      const name = `debug-red-${(chapterId ?? 'capitulo').replace(/[^0-9A-Za-z._-]/g, '_')}.json`;
+      const dump = {
+        nota: 'Sin cookies, cabeceras ni tokens: las URLs llevan solo los nombres de la query. Envíalo tal cual si la animación sigue sin funcionar.',
+        capitulo: chapterId ?? null,
+        resultado: outcome,
+        pagina: sanitizeUrl(page.url()),
+        guardado: new Date().toISOString(),
+        animaciones: {
+          encontradas: animCapture.total,
+          grabadas: animCapture.captured,
+          pendientes: animCapture.pending,
+          avisos: animCapture.notes,
+          componentes: animCapture.components,
+          peticionesDuranteLaActivacion: animCapture.network,
+        },
+        videos: videoCapture.total ? { total: videoCapture.total, capturados: videoCapture.captured, pendientes: videoCapture.pending, avisos: videoCapture.notes } : undefined,
+        peticiones: netLog,
+      };
+      const part = join(siteDir, name + '.part');
+      await writeFile(part, JSON.stringify(dump, null, 2), 'utf8');
+      await rename(part, join(siteDir, name));
+    } catch {
+      // el volcado es solo diagnóstico
+    }
+  };
   // Hasta 2 pasadas: si tras serializar aún hay loader/skeleton visible o imágenes
   // pendientes, se espera más (el doble) y se vuelve a capturar UNA vez.
   for (let pass = 0; pass < 2; pass++) {
@@ -937,6 +1110,10 @@ export async function saveChapterHtml(
     // los reproductores de vídeo son perezosos (solo póster hasta pulsar play): se activan antes de serializar
     if (pass === 0 && wantVideos) {
       videoCapture = await captureVideos(page).catch(() => videoCapture);
+    }
+    // animaciones (canvas dibujado por JS): se pulsa play y se graba; sin esto el canvas queda vacío offline
+    if (pass === 0 && wantAnimations) {
+      animCapture = await captureAnimations(page, { siteDir, maxMs: saveOpts.animationMaxMs }).catch(() => animCapture);
     }
     const prev = pass > 0 && data?.ok ? data : null;
     data = await serializeChapterData(page, tabMinMs);
@@ -961,6 +1138,7 @@ export async function saveChapterHtml(
     }
   }
   if (!data.ok || data.html.length < 200) {
+    await writeNetDump('sin contenido');
     return { ...none(data.title), problems: ['no se encontró el contenido del capítulo (iframe vacío)'] };
   }
 
@@ -995,12 +1173,13 @@ export async function saveChapterHtml(
   const tracks = await inlineLocalTracks(data.html, siteDir);
   data.html = tracks.html;
 
-  const docHtml = buildStandaloneHtml(data, wantVideos ? CHAPTER_FORMAT : CHAPTER_FORMAT_NO_VIDEOS);
+  const docHtml = buildStandaloneHtml(data, wantVideos ? CHAPTER_FORMAT : CHAPTER_FORMAT_NO_VIDEOS, wantAnimations);
 
   // Verificación previa a escribir: contenido no vacío, sin spinner/errores.
   const check = verifyChapterHtml(docHtml);
   if (!check.ok && check.textLength < 80) {
     // no se sobrescribe un buen archivo anterior con una página vacía
+    await writeNetDump('contenido vacío');
     return {
       ...none(data.title),
       problems: check.problems,
@@ -1069,6 +1248,11 @@ export async function saveChapterHtml(
       );
     }
   }
+  if (animCapture.total > 0 && animCapture.pending > 0) {
+    warnings.push(
+      `${animCapture.pending} de ${animCapture.total} animación(es) sin recursos locales (canvas vacío offline): ${animCapture.notes.slice(0, 2).join(' | ') || 'no se pudo grabar'}`
+    );
+  }
   if (tracks.missing.length) {
     warnings.push(`${tracks.missing.length} subtítulo(s) descargado(s) no se pudieron incrustar (${tracks.missing.slice(0, 2).join(', ')})`);
   }
@@ -1076,6 +1260,7 @@ export async function saveChapterHtml(
     warnings.push(`${data.tabs.failed} pestaña(s) no se pudieron capturar (${data.tabs.captured}/${data.tabs.tabs})`);
   }
 
+  await writeNetDump(check.ok ? 'ok' : 'con problemas: ' + check.problems.join('; '));
   return {
     ok: check.ok,
     title: data.title,
@@ -1090,6 +1275,7 @@ export async function saveChapterHtml(
     incomplete: incomplete || undefined,
     recaptured,
     videos: wantVideos ? videoCapture : undefined,
+    animations: wantAnimations ? animCapture : undefined,
   };
 }
 
