@@ -34,6 +34,12 @@ import {
   waitForChapterContent,
 } from './wait-for-chapter-content';
 import { saveLaunchCourseSite } from './save-course';
+import { setWaitPolicy } from './wait-policy';
+import {
+  AGGRESSIVE_PATTERNS,
+  blockUnneededResources,
+  TRACKER_PATTERNS,
+} from './block-resources';
 import { DEFAULT_ASSET_OPTIONS } from './download-assets';
 import sanitize = require('sanitize-filename');
 import { login } from './login';
@@ -72,9 +78,10 @@ const cmd = command({
     concurrency: option({
       long: 'concurrency',
       short: 'c',
-      type: number,
-      defaultValue: () => 10,
-      description: 'Specifies the maximum amount of pages downloaded at once.',
+      type: optional(number),
+      description:
+        'Páginas descargadas a la vez. Cursos "launch" (HTML offline): pestañas del navegador en paralelo, por defecto 3, máximo 6. ' +
+        'Modo PDF antiguo: por defecto 10.',
     }),
     outDir: option({
       long: 'out-dir',
@@ -127,6 +134,33 @@ const cmd = command({
       defaultValue: () => DEFAULT_ASSET_OPTIONS.retries,
       description: 'Reintentos con espera creciente para recursos y capítulos fallidos.',
     }),
+    minWait: option({
+      long: 'min-wait',
+      type: optional(number),
+      description:
+        'Tiempo mínimo (ms) que el contenido de cada capítulo debe llevar cargado antes de guardarlo, además de las esperas por condición (spinner/skeleton fuera, DOM estable, red inactiva). Por defecto 1500 (500 con --fast).',
+    }),
+    fast: flag({
+      long: 'fast',
+      description:
+        'Modo rápido (opt-in, menos seguro): esperas mínimas más cortas y bloquea también vídeo/audio y el gestor de etiquetas de Adobe en el navegador. Por defecto se prioriza que la captura sea correcta.',
+    }),
+    chapterTimeout: option({
+      long: 'chapter-timeout',
+      type: number,
+      defaultValue: () => 300,
+      description:
+        'Segundos máximos por intento de capítulo; al agotarse se reinicia esa pestaña y se reintenta.',
+    }),
+    noBlockTrackers: flag({
+      long: 'no-block-trackers',
+      description:
+        'No bloquear analítica/publicidad/seguimiento (Google Analytics, DoubleClick, Hotjar…) en el navegador.',
+    }),
+    screenshot: flag({
+      long: 'screenshot',
+      description: 'Guarda course.png (captura de depuración de la vista del curso).',
+    }),
     headful: flag({
       long: 'headful',
       description:
@@ -173,6 +207,25 @@ const cmd = command({
         ).password;
       console.log('');
     }
+
+    const waitPolicy = setWaitPolicy({
+      fast: args.fast,
+      minWaitMs: args.minWait,
+    });
+    const blockPatterns = args.noBlockTrackers
+      ? []
+      : [...TRACKER_PATTERNS, ...(args.fast ? AGGRESSIVE_PATTERNS : [])];
+    // pestañas en paralelo: 3 por defecto, entre 1 y 6
+    let tabs = 3;
+    if (args.concurrency !== undefined) {
+      tabs = Math.floor(args.concurrency) || 1;
+      if (tabs > 6) {
+        console.warn(`--concurrency ${tabs} es demasiado alto para el modo HTML; se limita a 6 pestañas (Netacad puede limitar o bloquear muchas pestañas a la vez).`);
+        tabs = 6;
+      }
+      if (tabs < 1) tabs = 1;
+    }
+    void waitPolicy;
 
     const browser = await puppeteer.launch({
       headless: args.headful ? false : true,
@@ -245,7 +298,7 @@ const cmd = command({
 
           courseTitle = await getCourseTitle(sessionPage);
           console.log('Course Title: ' + courseTitle);
-          await sessionPage.screenshot({ path: 'course.png' });
+          if (args.screenshot) await sessionPage.screenshot({ path: 'course.png' });
           urls = await getChapterUrls(sessionPage, { only: args.only });
           if (args.only) {
             console.log(
@@ -285,24 +338,63 @@ const cmd = command({
 
         if (launchCourse) {
           await restoreLaunchCurriculumPage(sessionPage, url);
-          await saveLaunchCourseSite(sessionPage, urls, courseId, courseTitle, args.outDir, {
-            courseUrl: url,
-            resume: !args.force,
-            retryFailed: args.retryFailed,
-            retries: Math.max(0, Math.floor(args.retries)),
-            prepareChapter: async (p, chapterUrl) => {
-              await gotoChapter(p, chapterUrl);
-              await dismissCookieBanner(p);
-              await waitForChapterContent(p, chapterUrl);
-              await waitForSpinners(p).catch(() => undefined);
-            },
-            assetOpts: {
-              ...DEFAULT_ASSET_OPTIONS,
-              concurrency: Math.max(1, Math.floor(args.assetConcurrency)),
+          await blockUnneededResources(sessionPage, blockPatterns);
+          const newWorkerPage = async () => {
+            const p = await browser.newPage();
+            p.setDefaultTimeout(120_000);
+            p.setDefaultNavigationTimeout(90_000);
+            await blockUnneededResources(p, blockPatterns);
+            return p;
+          };
+
+          // Ctrl+C: termina los capítulos en curso (escritura atómica), guarda índice y resumen.
+          const abort = new AbortController();
+          let sigints = 0;
+          const onSigint = () => {
+            sigints++;
+            if (sigints === 1) {
+              console.log(
+                '\nCtrl+C: se terminan los capítulos en curso y se guardan índice y resumen… (Ctrl+C otra vez para salir ya)'
+              );
+              abort.abort();
+            } else {
+              process.exit(130);
+            }
+          };
+          process.on('SIGINT', onSigint);
+          let saved;
+          try {
+            saved = await saveLaunchCourseSite(sessionPage, urls, courseId, courseTitle, args.outDir, {
+              courseUrl: url,
+              resume: !args.force,
+              retryFailed: args.retryFailed,
               retries: Math.max(0, Math.floor(args.retries)),
-            },
-          });
+              concurrency: tabs,
+              newPage: newWorkerPage,
+              chapterTimeoutMs: Math.max(10, args.chapterTimeout) * 1000,
+              signal: abort.signal,
+              progressBar: true,
+              prepareScrolls: true,
+              prepareChapter: async (p, chapterUrl) => {
+                await gotoChapter(p, chapterUrl);
+                await dismissCookieBanner(p);
+                await waitForChapterContent(p, chapterUrl);
+                await waitForSpinners(p).catch(() => undefined);
+              },
+              assetOpts: {
+                ...DEFAULT_ASSET_OPTIONS,
+                concurrency: Math.max(1, Math.floor(args.assetConcurrency)),
+                retries: Math.max(0, Math.floor(args.retries)),
+              },
+            });
+          } finally {
+            process.off('SIGINT', onSigint);
+          }
           await sessionPage.close().catch(() => undefined);
+          if (saved.aborted) {
+            process.exitCode = 130;
+            break; // no se empiezan más cursos
+          }
           continue;
         }
 
@@ -352,7 +444,7 @@ const cmd = command({
                 await chapterPage.close();
               }
             },
-            args.concurrency,
+            args.concurrency ?? 10,
             urls.length
           );
         } finally {
@@ -407,7 +499,13 @@ async function dismissCookieBanner(page: Page): Promise<void> {
       const btn = await page.$(selector);
       if (btn) {
         await btn.click();
-        await delay(800);
+        // espera a que el banner desaparezca (máx. 800 ms, como antes), en vez de dormir fijo
+        await waitUntil(
+          async () => !(await page.$eval(selector, (el) => (el as HTMLElement).getClientRects().length > 0).catch(() => false)),
+          800,
+          100
+        );
+        await delay(150);
         return;
       }
     } catch {
