@@ -96,3 +96,12 @@ test('verifyChapterHtml avisa de pestañas sin panel y lee el formato', () => {
   assert.strictEqual(r.format, 2);
   assert.ok(r.warnings.some((w) => /pestañas/.test(w)));
 });
+
+test('validador: url(%23id) dentro de un data:image/svg+xml de CSS no es una referencia rota', () => {
+  const { cssRefs } = require('../scripts/validate-download.js');
+  const css =
+    'a{background:url("data:image/svg+xml,<svg xmlns=\\"http://w\\"><g clip-path=\\"url(%23clip0_1)\\"><path fill=\\"%23F6F7F9\\"/></g></svg>") no-repeat;b:url(../x.png)}' +
+    "d{src:url('f.woff2')}";
+  const refs = cssRefs(css).filter((u) => !u.startsWith('data:'));
+  assert.deepStrictEqual(refs, ['../x.png', 'f.woff2']);
+});

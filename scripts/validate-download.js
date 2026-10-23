@@ -118,10 +118,38 @@ function parseAttrs(s) {
   return attrs;
 }
 
+function stripDataUris(css) {
+  // Quita el contenido de url("data:...") para no tomar como referencias los url(#id) / url(%23id) internos del SVG incrustado.
+  let out = '';
+  let i = 0;
+  const re = /url\(\s*(\\?["']?)data:/gi;
+  for (;;) {
+    re.lastIndex = i;
+    const m = re.exec(css);
+    if (!m) break;
+    out += css.slice(i, m.index) + 'url(data:)';
+    let j = m.index + m[0].length;
+    const q = m[1].replace('\\', '');
+    if (q) {
+      while (j < css.length) {
+        if (css[j] === '\\') j += 2;
+        else if (css[j] === q) break;
+        else j++;
+      }
+      j = css.indexOf(')', j);
+    } else {
+      j = css.indexOf(')', j);
+    }
+    i = j < 0 ? css.length : j + 1;
+  }
+  return out + css.slice(i);
+}
+
 /** Extrae url(...) y @import de un texto CSS. */
 function cssRefs(css) {
   const refs = [];
   let m;
+  css = stripDataUris(css);
   const re = /url\(\s*(?:\\?["']?)([^"')\s]+?)(?:\\?["']?)\s*\)/gi;
   while ((m = re.exec(css))) refs.push(m[1]);
   const re2 = /@import\s+(?:url\(\s*)?\\?["']([^"']+?)\\?["']/gi;
