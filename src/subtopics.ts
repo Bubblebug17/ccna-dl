@@ -16,10 +16,17 @@ const SUB_NUMBER = /^\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 export function isBogusSubtopicTitle(title: string): boolean {
   const t = title.trim();
   if (!t) return true;
-  if (/^[./]/.test(t)) return true;
+  // ". Ataques DNS" (título de "4.1.3. Ataques DNS" guardado con el punto del número) NO es falso:
+  // se repara con normalizeSubtopicTitle. ".0/16" o ".1 ????" sí lo son.
+  if (/^[./]/.test(t) && !/^\.\s+\p{L}/u.test(t)) return true;
   if (/^\.\d+(\/\d+)?$/.test(t)) return true;
   if (!/\p{L}/u.test(t)) return true; // sin ninguna letra: "0/16", ".2", "255.255.0.0"
   return false;
+}
+
+/** Quita el punto sobrante de un título guardado por versiones anteriores (". Ataques DNS" -> "Ataques DNS"). */
+export function normalizeSubtopicTitle(title: string): string {
+  return title.replace(/^\s*\.\s+(?=\p{L})/u, '').trim();
 }
 
 /**
@@ -34,7 +41,7 @@ export function isPlausibleSubtopic(s: Subtopic, section?: string): boolean {
 }
 
 export function filterPlausibleSubtopics(subs: Subtopic[], section?: string): Subtopic[] {
-  return subs.filter((s) => isPlausibleSubtopic(s, section));
+  return subs.filter((s) => isPlausibleSubtopic(s, section)).map((s) => ({ ...s, title: normalizeSubtopicTitle(s.title) }));
 }
 
 /**

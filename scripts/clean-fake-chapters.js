@@ -83,16 +83,24 @@ const INDEX_SUB_RE = /<li class="sub"><a href="([^"#]*)#sub-([^"]+)"[^>]*><span 
 /** Quita del índice los subtemas falsos. Devuelve el HTML nuevo y la lista de los quitados. */
 function cleanIndexHtml(html) {
   const removed = [];
+  const repaired = [];
   let out = html.replace(INDEX_SUB_RE, (whole, href, sub, num, title) => {
     const id = path.basename(href).replace(/\.html$/i, '');
     const why = bogusSubtopic(decodeEntities(sub), decodeEntities(title), sectionOf(id));
-    if (!why) return whole;
+    if (!why) {
+      // título con el punto del número (". Ataques DNS"): se repara en vez de quitar la entrada
+      if (/^\s*\.\s+\p{L}/u.test(decodeEntities(title))) {
+        repaired.push({ file: href, sub: decodeEntities(sub), title: decodeEntities(title) });
+        return whole.replace(/(<span class="t">)\s*\.\s+/, '$1');
+      }
+      return whole;
+    }
     removed.push({ file: href, sub: decodeEntities(sub), title: decodeEntities(title), why });
     return '';
   });
   // listas de subtemas que se quedaron vacías
   out = out.replace(/<ul class="subs">\s*<\/ul>/g, '');
-  return { html: out, removed };
+  return { html: out, removed, repaired };
 }
 
 /** Quita de un capítulo los atributos data-sub falsos. */
@@ -156,7 +164,7 @@ function stamp() {
  * Analiza (y, con apply, corrige) un curso. Devuelve el plan/resultado.
  */
 function cleanCourse(courseDir, { apply }) {
-  const plan = { dir: courseDir, index: { removed: [] }, chapters: [], quizzes: [], summary: { removed: [] }, backupDir: null, changed: false };
+  const plan = { dir: courseDir, index: { removed: [], repaired: [] }, chapters: [], quizzes: [], summary: { removed: [] }, backupDir: null, changed: false };
   const writes = []; // {file, content}
   const moves = []; // {file}
 
@@ -164,7 +172,8 @@ function cleanCourse(courseDir, { apply }) {
   if (fs.existsSync(indexFile)) {
     const r = cleanIndexHtml(fs.readFileSync(indexFile, 'utf8'));
     plan.index.removed = r.removed;
-    if (r.removed.length) writes.push({ file: indexFile, content: r.html });
+    plan.index.repaired = r.repaired;
+    if (r.removed.length || r.repaired.length) writes.push({ file: indexFile, content: r.html });
   }
 
   const chaptersDir = path.join(courseDir, 'chapters');
@@ -246,6 +255,7 @@ function report(plan, apply) {
     console.log(`   · index.html: ${verb} ${plan.index.removed.length} subtema(s) falso(s) del índice. Ejemplos:`);
     for (const r of plan.index.removed.slice(0, 5)) console.log(`       ${rel(r.file)} #${r.sub} "${r.title}" (${r.why})`);
   }
+  if (plan.index.repaired.length) console.log(`   · index.html: ${apply ? 'Corregidos' : 'Se corregirían'} ${plan.index.repaired.length} título(s) con un punto sobrante (". Ataques DNS" -> "Ataques DNS").`);
   if (plan.chapters.length) {
     const n = plan.chapters.reduce((a, c) => a + c.removed.length, 0);
     console.log(`   · ${verb} ${n} data-sub falso(s) en ${plan.chapters.length} capítulo(s):`);

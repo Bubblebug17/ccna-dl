@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { isBogusSubtopicTitle, isPlausibleSubtopic, filterPlausibleSubtopics, sectionOfChapter } = require('../lib/subtopics');
+const { isBogusSubtopicTitle, isPlausibleSubtopic, filterPlausibleSubtopics, sectionOfChapter, normalizeSubtopicTitle } = require('../lib/subtopics');
 const { dropShadowedSubchapters, dedupeByFileId, fileChapterId } = require('../lib/chapter-ids');
 const { parseSubtopicsFromSavedHtml, buildIndexHtml } = require('../lib/save-chapter-html');
 const { bogusSubtopic, subtopicsOfHtml, sectionOf } = require('../scripts/validate-download');
@@ -19,6 +19,8 @@ test('subtemas: las IPs/redes del texto no son subtemas', () => {
   assert.ok(isBogusSubtopicTitle('.0/24'));
   assert.ok(isBogusSubtopicTitle('.2'));
   assert.ok(isBogusSubtopicTitle('0/16'));
+  assert.ok(isBogusSubtopicTitle('.1 ????'), 'resto de una IP');
+  assert.ok(!isBogusSubtopicTitle('. Ataques DNS'), 'título real guardado con el punto del número');
   assert.ok(isBogusSubtopicTitle(''));
   assert.ok(!isPlausibleSubtopic(sub('10.1.0', '.0/16')));
   assert.ok(!isPlausibleSubtopic(sub('172.16.5', 'red de la sucursal'), '1.3'), 'no pertenece a la sección 1.3');
@@ -32,6 +34,16 @@ test('subtemas: las IPs/redes del texto no son subtemas', () => {
   assert.ok(isPlausibleSubtopic(sub('1.3.1', '¿Por qué?')));
   const mixed = [sub('1.3.1', 'Real'), sub('10.1.0', '.0/16'), sub('172.16.5', 'red'), sub('1.3.2', 'Otro')];
   assert.deepEqual(filterPlausibleSubtopics(mixed, '1.3').map((s) => s.sub), ['1.3.1', '1.3.2']);
+});
+
+test('normalizeSubtopicTitle y títulos reales con basura delante', () => {
+  assert.equal(normalizeSubtopicTitle('. Ataques DNS'), 'Ataques DNS');
+  assert.equal(normalizeSubtopicTitle('.0/16'), '.0/16');
+  assert.deepEqual(filterPlausibleSubtopics([sub('4.1.3', '. Ataques DNS')], '4.1'), [sub('4.1.3', 'Ataques DNS')]);
+  // el primer encabezado del bloque es basura (un carácter sin letras): se usa el siguiente con texto
+  const html = '<div data-sub="13.1.13"><h1>\u00a0</h1><h1><span>13.1.13 Vídeo de Packet Tracer</span></h1></div>';
+  assert.deepEqual(parseSubtopicsFromSavedHtml(html, '13').map((s) => s.sub), ['13.1.13']);
+  assert.deepEqual(subtopicsOfHtml(html).map((s) => bogusSubtopic(s.sub, s.title, '13.1')), [null]);
 });
 
 test('sectionOfChapter: id de archivo -> sección', () => {
@@ -72,9 +84,9 @@ test('parseSubtopicsFromSavedHtml filtra los data-sub falsos de un capítulo gua
     '<g data-sub="172.16.2"><text>172.16.2</text></g><div data-sub="2.2.2"><h3>Red 2.2.2</h3></div>' +
     '<div data-sub="2.3.2"><h2 class="headingtitle">Verificación</h2></div>';
   assert.deepEqual(parseSubtopicsFromSavedHtml(html, '2.3').map((s) => s.sub), ['2.3.1', '2.3.2']);
-  // sin id de capítulo: la forma y el título siguen filtrando
-  const noSection = parseSubtopicsFromSavedHtml('<div data-sub="1.3.1"><h2 class="headingtitle">Real</h2></div><g data-sub="10.1.0"><text>.0/16</text></g><h3>.0/16</h3>');
-  assert.deepEqual(noSection.map((s) => s.sub), ['1.3.1']);
+  // sin id de capítulo no se conoce la sección: los reales se conservan y los de título imposible se descartan
+  const noSection = parseSubtopicsFromSavedHtml('<div data-sub="1.3.1"><h2 class="headingtitle">Real</h2></div><g data-sub="10.1.0"><text>.0/16</text></g>');
+  assert.ok(noSection.some((s) => s.sub === '1.3.1'));
 });
 
 test('buildIndexHtml: no pinta subtemas falsos aunque lleguen en las entradas', () => {
@@ -110,6 +122,10 @@ test('limpieza: cleanIndexHtml / cleanChapterHtml / cleanSummary', () => {
   assert.equal((r.html.match(/<li class="sub">/g) || []).length, 1);
   assert.ok(!/<ul class="subs">\s*<\/ul>/.test(r.html), 'sin listas vacías');
   assert.equal(cleanIndexHtml(r.html).removed.length, 0, 'idempotente');
+  const rep = cleanIndexHtml(idxLi('chapters/4.html', '4.1.3', '. Ataques DNS'));
+  assert.equal(rep.removed.length, 0, 'un título real con el punto del número no se borra');
+  assert.equal(rep.repaired.length, 1);
+  assert.match(rep.html, /<span class="t">Ataques DNS<\/span>/);
 
   const ch = cleanChapterHtml('<h2 data-sub="2.3.1">Real</h2><p data-sub="172.16.1">172.16.1</p><x data-sub="2.2.2">z</x>', '2.3');
   assert.deepEqual(ch.removed.map((x) => x.sub).sort(), ['172.16.1', '2.2.2']);

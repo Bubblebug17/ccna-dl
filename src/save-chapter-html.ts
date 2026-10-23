@@ -1121,10 +1121,13 @@ export function parseSubtopicsFromSavedHtml(html: string, chapterId?: string): S
     if (seen.has(sub)) continue;
     seen.add(sub);
     const chunk = html.slice(m.index, m.index + 8000);
-    const tm =
-      chunk.match(/class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/i) ??
-      chunk.match(/<h[1-6][^>]*>([^<]+)/i);
-    result.push({ sub, title: tm ? tm[1].trim() : `Subtema ${sub}` });
+    // el primer encabezado puede ser basura sin letras ("<h1>\u00a0</h1>"): se usa el primero con texto
+    const cands = [
+      ...chunk.matchAll(/class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/gi),
+      ...chunk.matchAll(/<h[1-6][^>]*>(?:<[^>]+>)*([^<]+)/gi),
+    ].map((x) => x[1].trim());
+    const found = cands.find((c) => /\p{L}/u.test(c));
+    result.push({ sub, title: found ? found : `Subtema ${sub}` });
   }
   const section = chapterId ? sectionOfChapter(chapterId) : undefined;
   return filterSubtopics(result, section).sort((a, b) => compareChapterIds(a.sub, b.sub));

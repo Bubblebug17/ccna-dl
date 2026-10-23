@@ -118,7 +118,7 @@ function bogusSubtopic(sub, title, section) {
   const t = (title || '').trim();
   if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(sub)) return 'número con forma de IP';
   if (!t) return 'sin título';
-  if (/^[./]/.test(t)) return 'título "' + t.slice(0, 20) + '" (resto de una IP/red)';
+  if (/^[./]/.test(t) && !/^\.\s+\p{L}/u.test(t)) return 'título "' + t.slice(0, 20) + '" (resto de una IP/red)';
   if (!/\p{L}/u.test(t)) return 'título sin letras ("' + t.slice(0, 20) + '")';
   if (section && !sub.startsWith(section + '.')) return 'no pertenece a la sección ' + section;
   return null;
@@ -134,8 +134,10 @@ function subtopicsOfHtml(html) {
     if (seen.has(m[1])) continue;
     seen.add(m[1]);
     const chunk = html.slice(m.index, m.index + 8000);
-    const tm = /class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/i.exec(chunk) || /<h[1-6][^>]*>([^<]+)/i.exec(chunk);
-    out.push({ sub: m[1], title: tm ? decodeEntities(tm[1]).trim() : 'Subtema ' + m[1] });
+    // el primer encabezado puede ser basura sin letras ("<h1>\u00a0</h1>"): se usa el primero con texto
+    const cands = [...chunk.matchAll(/class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/gi), ...chunk.matchAll(/<h[1-6][^>]*>(?:<[^>]+>)*([^<]+)/gi)].map((x) => decodeEntities(x[1]).trim());
+    const found = cands.find((c) => /\p{L}/u.test(c));
+    out.push({ sub: m[1], title: found || 'Subtema ' + m[1] });
   }
   return out;
 }

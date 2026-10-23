@@ -341,7 +341,7 @@ Avisos de uso: pulsar «play» puede contar el vídeo como visto en tu progreso 
 
 ```powershell
 node scripts/clean-fake-chapters.js                 # simulación: lista lo que haría (--root, --course, --dir)
-node scripts/clean-fake-chapters.js --apply         # quita subtemas falsos del índice y de data-sub, corrige el resumen
+node scripts/clean-fake-chapters.js --apply         # quita subtemas falsos del índice y de data-sub (repara títulos ". Ataques DNS"), corrige el resumen
                                                     # y aparta los capítulos pisados por un cuestionario
 npm run build
 # vuelve a lanzar el MISMO comando de descarga (sin --force): rehace los apartados y los capítulos con vídeo pendiente
@@ -400,7 +400,7 @@ npm test
 | `test/bench.js` | Benchmark local (no es un test). |
 | `test/fixture-server.js` | Servidor local con latencia simulada y efecto de carga. |
 
-Estado actual: **49 pruebas** (11 en `unit`, 9 en `subtopics`, 3 en `save`, 10 en `video`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
+Estado actual: **50 pruebas** (11 en `unit`, 10 en `subtopics`, 3 en `save`, 10 en `video`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
 
 Benchmark de memoria: `node test/bench-mem.js --chapters 30 --scenarios antes:3,ahora:2` (ver [§10.4](#104-memoria-de-chrome-fixture)).
 
