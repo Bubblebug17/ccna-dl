@@ -214,6 +214,10 @@ function analyzeHtml(html) {
     badFragmentRefs: 0,
     video: { bigPlay: 0, videos: 0, offline: 0, tracks: 0 },
     anim: { views: 0, scrubbers: 0, offline: 0, attempted: false },
+    // cargador de estilos: sin la marca ccna-dl-styles los componentes anidados salen sin estilos (textos fuera de sus cajas)
+    stylesOutdated: /id="__ccna_adopted"/.test(html) && /data-adopted="/.test(html) && !/<meta name="ccna-dl-styles"/i.test(html),
+    // cajas de texto de gráficas dinámicas / animaciones sin texto (no se rellenó en la captura o el texto se perdió)
+    emptyBoxes: (html.match(/<(?:div|span|p)\b[^>]*class="[^"]*\b(?:dynamic-text-item|animation-text-item|canvas-text-item)\b[^"]*"[^>]*>\s*<\/(?:div|span|p)>/gi) || []).length,
   };
 
   const tm = /<title>([^<]*)<\/title>/i.exec(html);
@@ -668,6 +672,9 @@ function validateCourse(courseDir, opt) {
         pendingAnims + ' animación(es) sin recursos locales (canvas vacío offline: el reproductor y sus datos no se guardan' +
           (a.anim.attempted ? '; ya se intentó grabar, revise debug-red-<cap>.json con --dump-network' : '; vuelva a descargar este capítulo') + ').'
       );
+    if (a.stylesOutdated)
+      chap.warnings.push('guardado con el cargador de estilos antiguo: los componentes anidados (p. ej. gráficas dinámicas dentro de pestañas) pierden sus estilos y el texto sale fuera de sus cajas. Vuelva a descargar este capítulo (--only <cap> --force).');
+    if (a.emptyBoxes) chap.warnings.push('caja vacía en animación/pestaña: ' + a.emptyBoxes + ' caja(s) de texto de gráfica dinámica sin contenido');
     if (a.title && titles.has(a.title)) chap.warnings.push('mismo <title> que ' + titles.get(a.title));
     if (a.title) titles.set(a.title, chap.file);
     if (a.title && !/\|/.test(a.title)) chap.notes.push('título sin prefijo de módulo: "' + a.title.slice(0, 60) + '"');

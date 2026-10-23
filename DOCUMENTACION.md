@@ -387,6 +387,18 @@ npm run build
 # vuelve a lanzar el MISMO comando de descarga (sin --force): rehace los apartados y los capítulos con vídeo pendiente
 ```
 
+### 7.7 Gráficos dinámicos (`<dynamic-graphic-view>`, 1.3.3 y 1.3.4) y estilos anidados
+
+**Qué son.** `dynamic-graphic-view` dentro de `tabs-view`/`component-selector`: un SVG estático (`<inline-svg-viewer>`, viewBox 500×325) más un bloque `.dynamic-text` con textos HTML (`.dynamic-text-item.textN`) colocados con `left/top` en esas coordenadas. El host escala el contenido con `--scale-factor` (p. ej. 1,38). No hay CSS/SMIL animado en el HTML guardado; el paso a paso de Netacad es JS y no se guarda: offline se ve el estado final.
+
+**Causa del fallo (textos fuera de las cajas).** El posicionado (`position:relative` en el contenedor, `position:absolute` + `transform-origin:left top` en los hijos y en cada texto) vive solo en una hoja adoptada (`adoptedStyleSheets`, no en el `<style>` del shadow). El cargador offline solo recursaba en los hosts con `data-adopted`; un host sin hojas (p. ej. `<component-selector>`) cortaba la recursión y los `dynamic-graphic-view` anidados en pestañas se quedaban sin esa hoja (en el 1.3 real: 31 de 200 hosts). Sus hijos quedaban `position:static` con el origen de la transformación en el centro, y `.dynamic-text` caía ~325 px por debajo del SVG. No era la fuente (las `@font-face` son locales) ni el tamaño de ventana (captura a 1400×1200).
+
+**Arreglo.** `apply(root)` recorre todos los elementos con `shadowRoot`, aplica `data-adopted` si lo hay y **siempre** recurre al shadow. El HTML lleva `<meta name="ccna-dl-styles" content="2">`; los capítulos sin esa marca se consideran desactualizados (aviso del validador y nueva descarga al reanudar). Además, antes de serializar se espera a `document.fonts.ready` y a las animaciones finitas (máx. 3 s), y tras activar cada pestaña se espera a que terminen sus animaciones finitas y a que el texto/DOM del panel deje de cambiar (máx. 2,5 s), para no guardar cajas aún vacías.
+
+**Validador.** Avisos «cargador de estilos antiguo (re-descargar)» y «caja vacía en animación/pestaña» (`.dynamic-text-item` sin texto).
+
+**Regenerar** (capítulos ya descargados con el cargador antiguo): `npm run build` y lanzar el mismo comando con `--only 1.3 --force --concurrency 1` (y `--dump-network` si hace falta diagnóstico).
+
 ## 8. Validación
 
 El validador **no inicia sesión, no usa la red y no modifica** los cursos. Solo necesita Node ≥ 16.
@@ -427,7 +439,7 @@ $env:CHROME_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 npm test
 ```
 
-`npm test` = `npm run build` + `node --test --test-timeout=600000 test/unit.test.js test/subtopics.test.js test/save.test.js test/video.test.js test/animation.test.js test/parallel.test.js` (límite de 600 s por archivo; `parallel.test.js` tarda ~3 min). En un PC justo de RAM, ejecuta los tests con la descarga real parada. **No usan Netacad**: levantan un servidor local (`test/fixture-server.js`) que imita un capítulo "launch" (iframe, Shadow DOM, pestañas, esqueleto de carga, imágenes, fuentes, 404, HTML en vez de imagen, etc.).
+`npm test` = `npm run build` + `node --test --test-timeout=600000 test/unit.test.js test/subtopics.test.js test/save.test.js test/video.test.js test/animation.test.js test/graphic.test.js test/parallel.test.js` (límite de 600 s por archivo; `parallel.test.js` tarda ~3 min). En un PC justo de RAM, ejecuta los tests con la descarga real parada. **No usan Netacad**: levantan un servidor local (`test/fixture-server.js`) que imita un capítulo "launch" (iframe, Shadow DOM, pestañas, esqueleto de carga, imágenes, fuentes, 404, HTML en vez de imagen, etc.).
 
 | Archivo | Qué cubre |
 |---|---|
@@ -435,6 +447,7 @@ npm test
 | `test/subtopics.test.js` | Subtemas falsos (IP/redes), `dropShadowedSubchapters`/`dedupeByFileId`, filtro al leer capítulos y al construir el índice, `bogusSubtopic` del validador y `scripts/clean-fake-chapters.js` (simulación no modifica; `--apply` respalda, limpia y aparta). |
 | `test/video.test.js` | Vídeos con el servidor fixture + puppeteer (necesita ffmpeg para generar el vídeo): reproductor diferido con URL firmada mp4 y HLS (vía ffmpeg), reescritura a rutas locales, `.vtt` incrustado, apertura por `file://` (`readyState`, `duration`, pistas, sin peticiones externas), `video=none` → aviso y pendiente, `--no-videos`, formato 3 y reanudación. |
 | `test/animation.test.js` | Animaciones: el fixture `anim=ok` imita `<adobe-animate-view>` (canvas vacío hasta pulsar play, textos animados por JS, `<play-pause>`/`<aa-scrubber>` con Shadow DOM). Comprueba la grabación `.webm`, el HTML con `file://` (panel con contenido, deslizador que avanza, arrastrar el deslizador mueve el vídeo, textos según la línea de tiempo, sin peticiones externas), `anim=dead` → aviso y pendiente sin bucle, `--no-animations`, `--dump-network` sin tokens ni cookies, `sanitizeUrl`, `countPendingAnimations` y el aviso «animación sin recursos locales» del validador. |
+| `test/graphic.test.js` | Gráficos dinámicos y pestañas anidadas (fixture `graphic`): cada pestaña muestra su panel, las cajas tienen su texto final (relleno con retraso por JS y animación CSS), sin recorte y con el bbox del texto dentro del de su caja, con `file://` a 1400/1000/640 px; sensibilidad (sin hojas anidadas el control falla); marca `ccna-dl-styles` y detección/reanudación de capítulos con el cargador antiguo. |
 | `test/save.test.js` | Guardado de un capítulo (assets, reintentos, pestañas), HTML funcional sin red, resumen/fallos, reanudación y `--retry-failed`. |
 | `test/only.test.js` | `--only`: parser (capítulo, módulo, lista, rango, errores), caché del outline (cuándo contesta, mezcla, caducidad, archivo corrupto), mezcla del resumen y ejecución parcial sobre el fixture (no se pierden otros capítulos ni en `index.html` ni en `descarga-resumen.json`). |
 | `test/parallel.test.js` | Política de esperas, concurrencia (mismos archivos y mismo orden con 1 y 3 pestañas), caché de assets compartida, esqueleto de 2 s que se espera, re-captura y estado `parcial`, reanudación con paralelismo, timeout y pestaña caída, Ctrl+C, bloqueo de trackers por CDP; **memoria**: reciclado de pestañas (por contador, por heap, por poca RAM, y de la pestaña de sesión) con el mismo resultado que sin reciclar, con `--block-media` los medios se bloquean en el navegador pero los descarga Node, y `planTabs`. |
@@ -442,7 +455,7 @@ npm test
 | `test/bench.js` | Benchmark local (no es un test). |
 | `test/fixture-server.js` | Servidor local con latencia simulada y efecto de carga. |
 
-Estado actual: **62 pruebas** (11 en `unit`, 10 en `subtopics`, 3 en `save`, 5 en `only`, 10 en `video`, 7 en `animation`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
+Estado actual: **68 pruebas** (11 en `unit`, 10 en `subtopics`, 3 en `save`, 5 en `only`, 10 en `video`, 7 en `animation`, 6 en `graphic`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
 
 Benchmark de memoria: `node test/bench-mem.js --chapters 30 --scenarios antes:3,ahora:2` (ver [§10.4](#104-memoria-de-chrome-fixture)).
 
@@ -493,6 +506,7 @@ Ningún modo guardó capítulos con el esqueleto de carga a medias. La ganancia 
 - Comportamiento con ventana visible (`--headful`) en Windows; el efecto de pestañas en segundo plano se comprobó solo en Chrome headless.
 - Tiempos reales: el benchmark es un servidor local, no Netacad.
 - Capítulos con pestañas/carruseles reales: el 1.0 no tiene.
+- **Gráficos dinámicos (1.3.3/1.3.4):** el arreglo se comprobó sobre una copia parcheada del 1.3 ya descargado (textos dentro de las cajas a 1400/1000/700 px) y con el fixture; no se ha regenerado con Netacad real. El paso a paso original (JS de Netacad) no se reproduce: offline queda el estado final.
 
 ### 10.4 Memoria de Chrome (fixture)
 
@@ -540,6 +554,7 @@ Pasos generales de diagnóstico: (1) `--only <cap> --headful` para ver qué pasa
 - **Recursos que ya fallan en el servidor** (403/404) quedan como referencia remota en el CSS.
 - **Contraseña.** Se lee del `.env` o se pregunta; no la dejes en el historial de comandos.
 - **Uso responsable.** Solo con tu cuenta y para estudio personal; respeta los términos de Netacad.
+- **Gráficos dinámicos.** Se guarda el estado final (SVG + textos); no hay reproducción paso a paso. Los capítulos anteriores al marcador `ccna-dl-styles` pueden tener textos descolocados y se rehacen al reanudar o con `--force`.
 - **Lo no verificado** en vivo está resumido en [§10.3](#103-qué-no-está-verificado).
 
 ## 13. Estado de las descargas existentes y changelog
@@ -576,6 +591,7 @@ Avisos comunes a todos (esperables): favicon no guardado, fuentes `ciscoSansTT` 
 | `80c83fb` | perf(memoria): reciclado de pestañas (`--recycle-every`), medios bloqueados por defecto (`--no-block-media`; sustituido después por `--block-media` opcional), flags de Chrome de bajo consumo, pestañas por defecto 2 (automático según RAM libre) y aviso de memoria; el sondeo de carga ignora los spinners internos de `video.js`; pruebas y `test/bench-mem.js`. |
 | *(commit animaciones)* | feat: animaciones interactivas `<adobe-animate-view>` (2.3.2) reproducibles offline: se graba el canvas + línea de tiempo de textos (`capture-animations.ts`, §7.6), reproductor propio en el HTML, `--no-animations`, `--dump-network` (`debug-red-<cap>.json` sin cookies ni tokens), reanudación por `ccna-dl-anim`, aviso «animación sin recursos locales» en el verificador y en `validate-download.js`; pruebas `animation`. |
 | *(commit `--only`)* | feat: `--only` acepta capítulo, módulo, lista y rango con escaneo reducido a los módulos pedidos; `outline-cache.json` y `--refresh-outline`; el resumen y el índice se mezclan en ejecuciones parciales (antes `descarga-resumen.json` se sobrescribía solo con lo de la ejecución); pruebas `only`. |
+| *(commit gráficos)* | fix: cargador offline que no aplicaba las hojas adoptadas en componentes anidados (textos fuera de las cajas en 1.3.3/1.3.4), marca `ccna-dl-styles`, espera de fuentes/animaciones/pestañas, avisos del validador y `graphic.test.js`. |
 | *(commit anterior)* | fix: capítulos/subtemas inexistentes (IP tomadas por subtemas, cuestionario `X.Y.1` que pisaba la sección `X.Y`), filtros en detección/índice/validador, `scripts/clean-fake-chapters.js`; feat: vídeos reproducibles offline (activar el reproductor, mp4/HLS con ffmpeg, póster y `.vtt` incrustado, formato 3); el bloqueo de medios pasa a ser opcional (`--block-media`, se quita `--no-block-media`) y se añade `--no-videos`; pruebas `subtopics` y `video`. |
 
 La rama principal `master` está en `2772302` (v1.4.0 original, sin estas mejoras).

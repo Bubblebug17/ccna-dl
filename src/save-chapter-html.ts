@@ -9,7 +9,7 @@ import {
   DEFAULT_ASSET_OPTIONS,
   downloadAssets,
 } from './download-assets';
-import { CHAPTER_FORMAT, CHAPTER_FORMAT_NO_VIDEOS, verifyChapterHtml } from './verify-chapter';
+import { CHAPTER_FORMAT, CHAPTER_FORMAT_NO_VIDEOS, STYLES_LOADER_VERSION, verifyChapterHtml } from './verify-chapter';
 import { captureVideos, EMPTY_CAPTURE, VideoCaptureResult } from './capture-videos';
 import { captureAnimations, AnimationCaptureResult, EMPTY_ANIMATIONS, ANIM_META, sanitizeUrl } from './capture-animations';
 import { inlineLocalTracks } from './inline-vtt';
@@ -105,6 +105,41 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
       }
       const rest = tabMinMs - (Date.now() - t0);
       if (rest > 0) await sleep(rest);
+      // animaciones del panel: se espera a que terminen las finitas (CSS/Web Animations) y a que el texto/DOM
+      // del panel deje de cambiar (rellenos con retraso por JS). Sin esto se guardaba la caja aún vacía.
+      const sig = (p: Element): number => {
+        let n = 0;
+        for (const e of [p, ...deepNodes(p)]) {
+          n++;
+          const kids = e.childNodes;
+          for (let i = 0; i < kids.length; i++) if (kids[i].nodeType === 3) n += (kids[i].nodeValue || '').trim().length;
+        }
+        return n;
+      };
+      const runningFinite = (): boolean =>
+        (idoc.getAnimations?.() ?? []).some((a) => {
+          try {
+            const t = a.effect?.getComputedTiming();
+            return !!t && Number.isFinite(t.endTime as number) && a.playState === 'running';
+          } catch {
+            return false;
+          }
+        });
+      const quiet = Math.max(120, tabMinMs * 1.6);
+      let last = -1;
+      let since = Date.now();
+      const t1 = Date.now();
+      while (Date.now() - t1 < 2500) {
+        const p = getPanel();
+        if (!p) break;
+        const cur = sig(p);
+        if (cur !== last) {
+          last = cur;
+          since = Date.now();
+        }
+        if (!runningFinite() && Date.now() - since >= quiet) break;
+        await sleep(50);
+      }
     };
 
     const deepNodes = (root: ParentNode): Element[] => {
@@ -619,19 +654,27 @@ function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT,
       try { var s = new CSSStyleSheet(); s.replaceSync(css); return s; }
       catch (e) { return null; }
     });
+    // Recorre TODOS los hosts con shadow root, tengan o no data-adopted:
+    // un host intermedio sin hojas adoptadas (p. ej. <component-selector>)
+    // no debe cortar la recursión, o los componentes anidados (dentro de
+    // pestañas, acordeones...) se quedan sin estilos y se descolocan.
     function apply(root) {
-      var hosts = root.querySelectorAll('[data-adopted]');
-      for (var i = 0; i < hosts.length; i++) {
-        var el = hosts[i];
-        if (!el.shadowRoot) continue;
-        var ids = (el.getAttribute('data-adopted') || '').split(',');
-        var sheets = [];
-        for (var j = 0; j < ids.length; j++) {
-          var c = cache[parseInt(ids[j], 10)];
-          if (c) sheets.push(c);
+      var all = root.querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var sr = el.shadowRoot;
+        if (!sr) continue;
+        var attr = el.getAttribute('data-adopted');
+        if (attr) {
+          var ids = attr.split(',');
+          var sheets = [];
+          for (var j = 0; j < ids.length; j++) {
+            var c = cache[parseInt(ids[j], 10)];
+            if (c) sheets.push(c);
+          }
+          try { sr.adoptedStyleSheets = sheets; } catch (e) {}
         }
-        try { el.shadowRoot.adoptedStyleSheets = sheets; } catch (e) {}
-        apply(el.shadowRoot);
+        apply(sr);
       }
     }
     apply(document);
@@ -903,7 +946,7 @@ function buildStandaloneHtml(data: ChapterData, format: number = CHAPTER_FORMAT,
 </script>`;
 
   let inner = data.html;
-  const meta = `<meta name="ccna-dl-format" content="${format}">` + (anim ? `<meta name="${ANIM_META}" content="1">` : '');
+  const meta = `<meta name="ccna-dl-format" content="${format}"><meta name="ccna-dl-styles" content="${STYLES_LOADER_VERSION}">` + (anim ? `<meta name="${ANIM_META}" content="1">` : '');
   if (/<head[^>]*>/i.test(inner)) {
     inner = inner.replace(/<head[^>]*>/i, (m) => m + meta);
   } else {
@@ -1115,6 +1158,24 @@ export async function saveChapterHtml(
     if (pass === 0 && wantAnimations) {
       animCapture = await captureAnimations(page, { siteDir, maxMs: saveOpts.animationMaxMs }).catch(() => animCapture);
     }
+    // fuentes cargadas y animaciones CSS/Web Animations finitas terminadas: se guarda el estado FINAL
+    // (no un fotograma intermedio con opacity/transform a medias). Tope de 3 s: nunca bloquea la captura.
+    await page
+      .evaluate(async () => {
+        const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+        const settle = async () => {
+          try { await document.fonts?.ready; } catch { /* sin fuentes */ }
+          const anims = (document.getAnimations?.() ?? []).filter((a) => {
+            try {
+              const t = a.effect?.getComputedTiming();
+              return t && Number.isFinite(t.endTime as number) && a.playState === 'running';
+            } catch { return false; }
+          });
+          await Promise.allSettled(anims.map((a) => a.finished));
+        };
+        await Promise.race([settle(), sleep(3000)]);
+      })
+      .catch(() => undefined);
     const prev = pass > 0 && data?.ok ? data : null;
     data = await serializeChapterData(page, tabMinMs);
     if (!data.ok) break;

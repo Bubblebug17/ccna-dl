@@ -74,6 +74,74 @@ const PNG = Buffer.from(
   'base64'
 );
 
+// Gráfica dinámica como la de Netacad (<dynamic-graphic-view>): pestañas -> <x-selector> (shadow SIN hojas adoptadas)
+// -> <x-graphic> (shadow con <style> propio + hoja ADOPTADA que lo coloca). Las cajas son <div class="gbox"> y los
+// textos son HTML absoluto encima, en coordenadas 500x325 escaladas con transform. Los textos se rellenan con retraso
+// (JS) y con una animación CSS (opacity 0 -> 1 con fill-mode forwards). Si la hoja adoptada no se aplica al nodo anidado,
+// los textos caen fuera de sus cajas (el fallo real de 1.3.3 / 1.3.4).
+const graphicScript = `<script>
+  const GRAPHICS = [
+    { title: 'Estado Down a estado Init', boxes: [['b1', 40, 120, 180, 34, 'Estado Down'], ['b2', 40, 200, 180, 34, 'Estado Init'], ['b3', 120, 270, 360, 30, 'Hello! mi router ID es 172.16.5.1']] },
+    { title: 'El estado Init', boxes: [['b1', 300, 120, 170, 34, 'Lista de vecinos del R2'], ['b2', 40, 200, 220, 34, 'Estado Init']] },
+  ];
+  class XSelector extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = '<x-graphic data-g="' + this.getAttribute('data-g') + '"></x-graphic>';
+    }
+  }
+  class XGraphic extends HTMLElement {
+    connectedCallback() {
+      const g = GRAPHICS[Number(this.getAttribute('data-g'))];
+      const root = this.attachShadow({ mode: 'open' });
+      const w = Math.min(Number(this.getAttribute('data-w') || 690), 690);
+      const sf = w / 500;
+      this.style.setProperty('--cw', w + 'px');
+      this.style.setProperty('--ch', (325 * sf) + 'px');
+      this.style.setProperty('--sf', String(sf));
+      root.innerHTML = '<style>.content{width:var(--cw);height:var(--ch);> *{height:325px;width:500px;transform:scale(var(--sf))}}</style>' +
+        '<div class="content"><div class="wrapper">' +
+        g.boxes.map((b) => '<div class="gbox" id="' + b[0] + '" style="left:' + b[1] + 'px;top:' + b[2] + 'px;width:' + b[3] + 'px;height:' + b[4] + 'px"></div>').join('') +
+        '</div><div class="dyn"><div class="t title" style="left:0;top:20px;width:100%">' + g.title + '</div>' +
+        g.boxes.map((b) => '<div class="t item" data-box="' + b[0] + '" style="left:' + (b[1] + 10) + 'px;top:' + (b[2] + 8) + 'px"></div>').join('') +
+        '</div></div>';
+      const sh = new CSSStyleSheet();
+      sh.replaceSync('.content{position:relative;overflow:visible;& > *{position:absolute;transform-origin:left top}' +
+        '& .wrapper{z-index:2;& .gbox{position:absolute;box-sizing:border-box;border:2px solid #f80;background:#fde}}' +
+        '& .dyn{z-index:4;line-height:14px;& .t{position:absolute;font:12px Arial,sans-serif;white-space:nowrap;color:#000}' +
+        '& .item{opacity:0;animation:ccnafade .3s .1s forwards}& .title{text-align:center;font-size:20px}}}' +
+        '@keyframes ccnafade{from{opacity:0}to{opacity:1}}');
+      root.adoptedStyleSheets = [sh];
+      // relleno con retraso (como el texto que va apareciendo en la animación original)
+      setTimeout(() => {
+        root.querySelectorAll('.item').forEach((el) => {
+          const b = g.boxes.find((x) => x[0] === el.getAttribute('data-box'));
+          el.textContent = b[5];
+        });
+      }, 200);
+    }
+  }
+  class XGTabs extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      let sel = 0;
+      const render = () => {
+        root.innerHTML = '<div role="tablist">' + GRAPHICS.map((g, i) =>
+          '<button role="tab" class="gtab" data-index="' + i + '" aria-selected="' + (i === sel) + '">' + (i + 1) + '. ' + g.title + '</button>').join('') +
+          '</div><div role="tabpanel" data-panel="' + sel + '"><p>Panel ' + sel + ' con su gráfica.</p><x-selector data-g="' + sel + '"></x-selector></div>';
+        root.querySelectorAll('[role=tab]').forEach((b, i) => b.addEventListener('click', () => { sel = i; render(); }));
+      };
+      const sh = new CSSStyleSheet();
+      sh.replaceSync('.gtab{padding:4px}');
+      root.adoptedStyleSheets = [sh];
+      render();
+    }
+  }
+  customElements.define('x-selector', XSelector);
+  customElements.define('x-graphic', XGraphic);
+  customElements.define('x-gtabs', XGTabs);
+</script>`;
+
 function createFixture(opts = {}) {
   const latencyMs = opts.latencyMs || 0;
   const hits = {};
@@ -92,6 +160,7 @@ function createFixture(opts = {}) {
   const sticky = q.get('sticky') === '1';
   const heavy = q.get('heavy') === '1';
   const video = q.get('video') || ''; // 'mp4' | 'hls' | 'none' (el reproductor nunca monta el <video>)
+  const graphic = q.get('graphic') === '1'; // pestañas con gráficas dinámicas (shadow DOM anidado + hoja adoptada)
   const anim = q.get('anim') || ''; // 'ok' | 'dead' (el botón play no arranca nada): <adobe-animate-view> como el de Netacad
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Capítulo ${n}</title>
@@ -116,6 +185,7 @@ ${video ? '<media-view></media-view>' : ''}
 <a id="pka" role="button" href="/assets/files/lab_a_es-xl.pka">Laboratorio PT</a>
 <img id="uniq" src="/img/u${n}.png" alt="unico">
 ${anim ? '<adobe-animate-view></adobe-animate-view>' : ''}
+${graphic ? '<x-gtabs></x-gtabs>' : ''}
 <x-lazy></x-lazy>
 <x-widget></x-widget>
 <script>fetch('/blocked-tracker/t.js').catch(function(){});</script>
@@ -164,6 +234,7 @@ ${video ? `<script>
   }
   customElements.define('media-view', MediaView);
 </script>` : ''}
+${graphic ? graphicScript : ''}
 ${anim ? `<script>
   // Animación tipo Adobe Animate de Netacad: <adobe-animate-view> con un <canvas> VACÍO hasta pulsar play,
   // textos HTML que anima el JS (opacity inline), y controles <play-pause> + <aa-scrubber> (custom elements con
@@ -280,7 +351,7 @@ ${anim ? `<script>
     const lp = path === '/launch' ? url.searchParams : null;
     if (lp) {
       const n = (lp.get('_chapter') || '1.1.1').split('.')[0];
-      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video', 'anim'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
+      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video', 'anim', 'graphic'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
       return send(200, 'text/html', `<!doctype html><html><head><title>Launch ${n}</title></head><body><main id="main-content"><h1>Curso de prueba</h1><iframe src="/authoring-resources/ch${n}.html${extra ? '?' + extra : ''}" style="width:1000px;height:900px;border:0"></iframe></main></body></html>`);
     }
     const m = path.match(/^\/launch(\d+)\.html$/);

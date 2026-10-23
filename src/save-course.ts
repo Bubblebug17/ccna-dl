@@ -219,7 +219,9 @@ export async function saveLaunchCourseSite(
       if (v && v.bytes > 0) {
         const why = !v.ok
           ? v.problems[0]
-          : v.format >= 2 && v.videosPending > 0
+          : v.stylesOutdated
+            ? 'estilos de componentes anidados sin aplicar (textos fuera de sus cajas)'
+            : v.format >= 2 && v.videosPending > 0
             ? `${v.videosPending} vídeo(s) sin reproductor offline (se activarán y descargarán)`
             : wantAnimations && (v.animationsPending ?? 0) > 0
               ? `${v.animationsPending} animación(es) sin recursos locales (se grabarán)`

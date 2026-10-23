@@ -8,6 +8,13 @@ import { dirname, join, normalize } from 'path';
 export const CHAPTER_FORMAT = 3;
 /** Formato de los capítulos guardados sin activar vídeos (--no-videos). */
 export const CHAPTER_FORMAT_NO_VIDEOS = 2;
+/**
+ * Versión del cargador de estilos del HTML guardado. 2 = aplica las hojas adoptadas a TODOS los shadow roots
+ * (también a los componentes anidados bajo hosts sin hojas, p. ej. <component-selector> dentro de una pestaña).
+ * Los capítulos guardados sin esta marca descolocan los textos de las gráficas dinámicas (salen de sus cajas).
+ */
+export const STYLES_LOADER_VERSION = 2;
+export const STYLES_META_RE = /<meta name="ccna-dl-styles" content="(\d+)"/i;
 export const FORMAT_META_RE = /<meta name="ccna-dl-format" content="(\d+)"/i;
 
 export type VerifyResult = {
@@ -26,6 +33,8 @@ export type VerifyResult = {
   animationsPending?: number;
   /** El capítulo se guardó intentando grabar las animaciones (meta ccna-dl-anim). */
   animAttempted?: boolean;
+  /** Tiene hojas adoptadas pero se guardó con el cargador antiguo (componentes anidados sin estilos). */
+  stylesOutdated?: boolean;
 };
 
 const ERROR_RE =
@@ -79,11 +88,12 @@ export const ANIM_ATTEMPT_RE = /<meta name="ccna-dl-anim"/i;
  * vídeos) solo se repiten si tienen vídeos sin activar: así no se vuelve a bajar todo el curso.
  */
 export function chapterUpToDate(
-  v: { ok: boolean; format: number; videosPending: number; animationsPending?: number; animAttempted?: boolean },
+  v: { ok: boolean; format: number; videosPending: number; animationsPending?: number; animAttempted?: boolean; stylesOutdated?: boolean },
   wantVideos: boolean,
   wantAnimations = true
 ): boolean {
   if (!v.ok) return false;
+  if (v.stylesOutdated) return false; // cargador de estilos antiguo: los textos de las gráficas salen de sus cajas
   // animaciones sin grabar: se repite el capítulo salvo que ya se intentara (si no se pudo, avisa; no se repite en bucle)
   if (wantAnimations && (v.animationsPending ?? 0) > 0 && !v.animAttempted) return false;
   if (!wantVideos) return v.format >= CHAPTER_FORMAT_NO_VIDEOS;
@@ -128,13 +138,19 @@ export function verifyChapterHtml(html: string): Omit<VerifyResult, 'localRefs'>
     warnings.push(`${animationsPending} animación(es) sin recursos locales (canvas vacío: el reproductor original no se guarda)`);
   }
 
+  // hojas adoptadas guardadas con el cargador antiguo (no recorre los shadow roots anidados)
+  const stylesOutdated = /id="__ccna_adopted"/.test(html) && /data-adopted="/.test(html) && !STYLES_META_RE.test(html);
+  if (stylesOutdated) {
+    warnings.push('capítulo guardado con el cargador de estilos antiguo: los componentes anidados (gráficas dinámicas en pestañas) salen sin estilos y con el texto fuera de sus cajas; hay que volver a descargarlo');
+  }
+
   // pestañas: todas deben tener su panel
   const markup = html.replace(/<script\b[\s\S]*?<\/script>/gi, ' ');
   const tabs = (markup.match(/role="tab"/g) || []).length;
   const panels = (markup.match(/role="tabpanel"/g) || []).length;
   if (tabs > panels) warnings.push(`pestañas sin panel guardado: ${tabs} pestañas, ${panels} paneles`);
 
-  return { ok: problems.length === 0, problems, warnings, format, bytes, textLength: text.length, refs: localAssetRefs(html), videosPending, animationsPending, animAttempted: ANIM_ATTEMPT_RE.test(html) };
+  return { ok: problems.length === 0, problems, warnings, format, bytes, textLength: text.length, refs: localAssetRefs(html), videosPending, animationsPending, animAttempted: ANIM_ATTEMPT_RE.test(html), stylesOutdated };
 }
 
 /** Verifica un capítulo ya guardado: contenido + que todos los assets referenciados existan y no estén vacíos. */
@@ -158,6 +174,7 @@ export async function verifyChapterFile(
       videosPending: 0,
       animationsPending: 0,
       animAttempted: false,
+      stylesOutdated: false,
     };
   }
   const v = verifyChapterHtml(html);
@@ -203,6 +220,7 @@ export async function verifyChapterFile(
     videosPending: v.videosPending,
     animationsPending: v.animationsPending,
     animAttempted: v.animAttempted,
+    stylesOutdated: v.stylesOutdated,
   };
 }
 
