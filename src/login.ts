@@ -3,6 +3,7 @@ import { catchedRace, delay } from './util/promise';
 import { waitForSpinners } from './wait-for-spinners';
 
 export async function login(page: Page, user: string, password: string) {
+  console.log("Login Page Loaded");
   const userElm = await page.$('input[name="username"]');
   if (!userElm) throw 'Username input not found.';
   await userElm.type(user);
@@ -68,7 +69,20 @@ export async function login(page: Page, user: string, password: string) {
 
   const submitBtn = await page.$('input[name="login"]');
   if (!submitBtn) throw 'Login submit button not found.';
+  console.log("Credentials Submitted");
   submitBtn.click();
 
   await page.waitForNavigation({ waitUntil: 'networkidle2' });
+  console.log("Navigation Completed");
+  await delay(5000);
+  if((await page.content()).includes('Invalid username or password.')){
+    throw 'Invalid username or password.';
+  }
+  else if((await page.url()).includes('dashboard')){
+    console.log("Login Successful");
+  }
+  else{
+    throw 'Login Failed';
+  }
+  //console.log(await page.content());
 }
