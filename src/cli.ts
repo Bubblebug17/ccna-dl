@@ -12,12 +12,14 @@ import {
   run,
   string,
 } from 'cmd-ts';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import { existsSync, readFileSync } from 'fs';
+import { join, resolve as resolvePath } from 'path';
+import { spawnSync } from 'child_process';
 import puppeteer, { Page, PaperFormat } from 'puppeteer';
 // @ts-ignore
 import { _paperFormats as paperFormats } from 'puppeteer-core';
 import { delay, promisePool } from './util/promise';
+import { fmtDuration, waitUntil } from './util/retry';
 import { mkdir, rm, writeFile } from 'fs/promises';
 import * as muhammara from 'muhammara';
 import * as cliProgress from 'cli-progress';
@@ -31,14 +33,8 @@ import {
   restoreLaunchCurriculumPage,
   waitForChapterContent,
 } from './wait-for-chapter-content';
-import {
-  buildIndexHtml,
-  chapterFileName,
-  entriesFromSavedChapters,
-  IndexEntry,
-  mergeIndexEntries,
-  saveChapterHtml,
-} from './save-chapter-html';
+import { saveLaunchCourseSite } from './save-course';
+import { DEFAULT_ASSET_OPTIONS } from './download-assets';
 import sanitize = require('sanitize-filename');
 import { login } from './login';
 import { getChapterUrls } from './get-chapters';
@@ -64,8 +60,8 @@ const cmd = command({
     user: option({
       long: 'user',
       short: 'u',
-      type: string,
-      description: 'Your login email/username.',
+      type: optional(string),
+      description: 'Your login email/username (not needed with --validate).',
     }),
     password: option({
       long: 'password',
@@ -104,6 +100,33 @@ const cmd = command({
       description:
         'Only download the chapter with this number (e.g. "1.0"). For debugging.',
     }),
+    validate: flag({
+      long: 'validate',
+      description:
+        'Valida OFFLINE (sin login) las descargas de --out-dir y escribe validation-report.md. No descarga nada.',
+    }),
+    retryFailed: flag({
+      long: 'retry-failed',
+      description:
+        'Descarga solo los capítulos listados en descarga-fallos.json del curso (de la ejecución anterior).',
+    }),
+    force: flag({
+      long: 'force',
+      description:
+        'Vuelve a descargar todo aunque el capítulo ya exista y esté verificado (por defecto se omiten).',
+    }),
+    assetConcurrency: option({
+      long: 'asset-concurrency',
+      type: number,
+      defaultValue: () => DEFAULT_ASSET_OPTIONS.concurrency,
+      description: 'Descargas simultáneas de recursos (imágenes, fuentes…) por capítulo.',
+    }),
+    retries: option({
+      long: 'retries',
+      type: number,
+      defaultValue: () => DEFAULT_ASSET_OPTIONS.retries,
+      description: 'Reintentos con espera creciente para recursos y capítulos fallidos.',
+    }),
     headful: flag({
       long: 'headful',
       description:
@@ -111,6 +134,17 @@ const cmd = command({
     }),
   },
   handler: async (args) => {
+    if (args.validate) {
+      process.exitCode = runValidator(args.outDir);
+      return;
+    }
+    if (!args.user) {
+      console.error('Falta --user (tu correo/usuario de Netacad).');
+      process.exitCode = 2;
+      return;
+    }
+    const user: string = args.user;
+
     if (args.format && !hasOwnProperty(paperFormats, args.format)) {
       console.error(
         `Invalid page format specified. Possible options are: ${JSON.stringify(
@@ -173,12 +207,13 @@ const cmd = command({
             console.log('Login Button Found');
             console.log('Requesting Login Page');
             await LoginButton.click();
-            await delay(3000);
+            // en cuanto aparece el formulario seguimos (máx. 3 s, igual que antes)
+            await waitUntil(async () => !!(await sessionPage.$('input[name="username"]')), 3000, 150);
           } else {
             throw 'No Login Button Found';
           }
 
-          await login(sessionPage, args.user, password);
+          await login(sessionPage, user, password);
           const profileEl = await sessionPage.$('.headerProfileName--cqryb');
           const studentName = profileEl
             ? await profileEl.evaluate((el) => el.textContent?.trim() ?? '')
@@ -188,13 +223,24 @@ const cmd = command({
           console.log(url);
           await sessionPage.goto(url, { waitUntil: 'networkidle2' });
           console.log('Course Page Loaded');
-          await delay(5000);
+          await waitUntil(
+            async () =>
+              !!(await sessionPage.$(
+                '#course-outline, [class*="nodeList"], [class*="courseTitle"], iframe'
+              )),
+            5000,
+            150
+          );
           await dismissCookieBanner(sessionPage);
 
           if (/\/launch\b/.test(url) && !/\/launch\b/.test(sessionPage.url())) {
             console.log('La página salió del curso, volviendo a abrirlo…');
             await sessionPage.goto(url, { waitUntil: 'networkidle2' });
-            await delay(4000);
+            await waitUntil(
+              async () => !!(await sessionPage.$('#course-outline, [class*="nodeList"], iframe')),
+              4000,
+              150
+            );
           }
 
           courseTitle = await getCourseTitle(sessionPage);
@@ -214,12 +260,14 @@ const cmd = command({
                 : 'No hay URLs de capítulo para descargar.'
             );
             await sessionPage.close();
-            return;
+            process.exitCode = 1;
+            continue;
           }
         } catch (e) {
-          console.error('Error:', e);
-          await sessionPage.close();
-          return;
+          console.error(`Error en el curso ${url}:`, e);
+          await sessionPage.close().catch(() => undefined);
+          process.exitCode = 1;
+          continue; // antes: return (abortaba también los demás cursos)
         }
 
         const launchCourse =
@@ -237,13 +285,23 @@ const cmd = command({
 
         if (launchCourse) {
           await restoreLaunchCurriculumPage(sessionPage, url);
-          await saveLaunchCourseSite(
-            sessionPage,
-            urls,
-            courseId,
-            courseTitle,
-            args.outDir
-          );
+          await saveLaunchCourseSite(sessionPage, urls, courseId, courseTitle, args.outDir, {
+            courseUrl: url,
+            resume: !args.force,
+            retryFailed: args.retryFailed,
+            retries: Math.max(0, Math.floor(args.retries)),
+            prepareChapter: async (p, chapterUrl) => {
+              await gotoChapter(p, chapterUrl);
+              await dismissCookieBanner(p);
+              await waitForChapterContent(p, chapterUrl);
+              await waitForSpinners(p).catch(() => undefined);
+            },
+            assetOpts: {
+              ...DEFAULT_ASSET_OPTIONS,
+              concurrency: Math.max(1, Math.floor(args.assetConcurrency)),
+              retries: Math.max(0, Math.floor(args.retries)),
+            },
+          });
           await sessionPage.close().catch(() => undefined);
           continue;
         }
@@ -323,107 +381,17 @@ const cmd = command({
   },
 });
 
-async function saveLaunchCourseSite(
-  page: Page,
-  urls: string[],
-  courseId: string,
-  courseTitle: string,
-  outDir: string
-): Promise<void> {
-  console.log('Guardando capítulos como HTML.');
-
-  const folderName = sanitize(`${courseId}_${courseTitle}`) || courseId;
-  const siteDir = join(outDir, folderName);
-  const chaptersDir = join(siteDir, 'chapters');
-  await mkdir(chaptersDir, { recursive: true });
-
-  await page.setViewport({ width: 1400, height: 1200 });
-
-  const entries: IndexEntry[] = [];
-  const downloaded = new Map<string, boolean>();
-  const bar = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
-  bar.start(urls.length, 0);
-
-  try {
-    for (const chapterUrl of urls) {
-      const chapter = urlToChapterId(chapterUrl).replace(/\.1$/, '');
-      try {
-        await gotoChapter(page, chapterUrl);
-        await dismissCookieBanner(page);
-        await waitForChapterContent(page, chapterUrl);
-        await waitForSpinners(page).catch(() => undefined);
-
-        const fileName = chapterFileName(chapter);
-        let res = await saveChapterHtml(
-          page,
-          join(chaptersDir, fileName),
-          siteDir,
-          downloaded,
-          chapter
-        );
-        if (!res.ok) {
-          console.warn(`\n  · reintentando capítulo ${chapter}…`);
-          await gotoChapter(page, chapterUrl);
-          await waitForChapterContent(page, chapterUrl);
-          await waitForSpinners(page).catch(() => undefined);
-          res = await saveChapterHtml(
-            page,
-            join(chaptersDir, fileName),
-            siteDir,
-            downloaded,
-            chapter
-          );
-        }
-        if (res.ok) {
-          entries.push({
-            chapter,
-            title: res.title || chapter,
-            file: `chapters/${fileName}`,
-            subtopics: res.subtopics,
-          });
-          if (res.failed > 0) {
-            console.warn(
-              `\n  · ${chapter}: ${res.failed}/${res.assets} recursos no se pudieron descargar`
-            );
-          }
-        } else {
-          console.warn(`\n  · capítulo ${chapter}: sin contenido, omitido`);
-        }
-      } catch (e) {
-        console.warn(`\n  · capítulo ${chapter}: error (${String(e)})`);
-      }
-      bar.increment();
-    }
-  } finally {
-    bar.stop();
+/** Ejecuta scripts/validate-download.js (sin login, sin red) sobre outDir. */
+function runValidator(outDir: string): number {
+  const script = join(__dirname, '..', 'scripts', 'validate-download.js');
+  if (!existsSync(script)) {
+    console.error(`No se encontró el validador: ${script}`);
+    return 2;
   }
-
-  const indexPath = join(siteDir, 'index.html');
-  let indexEntries = entries;
-  if (indexEntries.length < urls.length) {
-    const fromDisk = await entriesFromSavedChapters(chaptersDir);
-    if (fromDisk.length) {
-      indexEntries = mergeIndexEntries(fromDisk, entries);
-      if (entries.length === 0) {
-        console.warn(
-          `No se guardó contenido nuevo; índice reconstruido desde ${fromDisk.length} capítulo(s) en disco.`
-        );
-      }
-    }
-  }
-
-  if (indexEntries.length === 0) {
-    console.error(
-      'No hay capítulos guardados. No se actualiza index.html para no borrar el índice anterior.'
-    );
-    return;
-  }
-
-  await writeFile(indexPath, buildIndexHtml(courseTitle, indexEntries), 'utf8');
-
-  console.log(
-    `Success. ${entries.length}/${urls.length} capítulos guardados. Índice: ${indexEntries.length} entradas. Abre: ${indexPath}`
-  );
+  const root = resolvePath(outDir);
+  console.log(`Validando descargas en ${root} (sin conexión)…`);
+  const r = spawnSync(process.execPath, [script, '--root', root], { stdio: 'inherit' });
+  return r.status ?? 2;
 }
 
 async function dismissCookieBanner(page: Page): Promise<void> {

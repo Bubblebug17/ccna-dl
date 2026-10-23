@@ -1,15 +1,15 @@
 import { Page } from 'puppeteer';
 import { writeFile, mkdir, readdir, readFile } from 'fs/promises';
-import { createWriteStream } from 'fs';
-import { pipeline } from 'stream/promises';
-import { Readable } from 'stream';
-import { dirname, join } from 'path';
+import { join } from 'path';
 import { scrollLaunchContent } from './wait-for-chapter-content';
-import { delay } from './util/promise';
+import { waitUntil } from './util/retry';
+import {
+  AssetOptions,
+  DEFAULT_ASSET_OPTIONS,
+  downloadAssets,
+} from './download-assets';
+import { CHAPTER_FORMAT, verifyChapterHtml } from './verify-chapter';
 import sanitize = require('sanitize-filename');
-
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
 
 type Subtopic = { sub: string; title: string };
 
@@ -34,13 +34,17 @@ type ChapterData = {
   // url absoluta -> ruta relativa canónica (p.ej. "assets/img/abc_logo.png")
   assets: Record<string, string>;
   subtopics: Subtopic[];
+  /** Resultado de la captura de pestañas (tabs-view). */
+  tabs: { widgets: number; tabs: number; captured: number; failed: number };
 };
 
 // Serializa el documento del iframe de contenido (same-origin) incluyendo el
 // Shadow DOM como Declarative Shadow DOM, deduplicando adoptedStyleSheets y
 // reescribiendo TODAS las referencias a recursos hacia rutas locales.
+// Además recorre las pestañas (tabs-view) para guardar el panel de CADA pestaña
+// (en la web solo el panel activo existe en el DOM).
 async function serializeChapterData(page: Page): Promise<ChapterData> {
-  return page.evaluate(() => {
+  return page.evaluate(async () => {
     const empty: ChapterData = {
       ok: false,
       title: '',
@@ -49,6 +53,7 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       sheets: [],
       assets: {},
       subtopics: [],
+      tabs: { widgets: 0, tabs: 0, captured: 0, failed: 0 },
     };
 
     const iframe = Array.from(document.querySelectorAll('iframe')).find((f) =>
@@ -63,8 +68,10 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       doc = null;
     }
     if (!doc || !doc.body) return empty;
+    const idoc: Document = doc;
 
-    const baseHref = doc.baseURI || iframe.src;
+    const baseHref = idoc.baseURI || iframe.src;
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
     const deepNodes = (root: ParentNode): Element[] => {
       const out: Element[] = [];
@@ -108,8 +115,11 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       if (!url) return null;
       const t = url.trim();
       if (!t || t.startsWith('data:') || t.startsWith('blob:')) return null;
-      if (t.startsWith('#') || t.startsWith('javascript:') || t.startsWith('mailto:'))
-        return null;
+      // referencias a ids internos de SVG: url(#clip0) o su forma codificada %23clip0
+      if (t.startsWith('#') || t.startsWith('%23')) return null;
+      // ya reescrita por nosotros (procesar dos veces un mismo nodo no debe duplicar rutas)
+      if (t.startsWith('../assets/')) return null;
+      if (t.startsWith('javascript:') || t.startsWith('mailto:')) return null;
       try {
         const u = new URL(t, baseHref);
         if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
@@ -145,26 +155,23 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
 
     const rewriteCss = (css: string): string => {
       if (!css) return css;
-      // url(...)
+      // url(...) con comillas que respetan escapes: así un data:image/svg+xml con
+      // url(%23clip) dentro NO se parte ni se reescribe (localRef ignora data:).
       let out = css.replace(
-        /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi,
-        (m, _q, u) => {
+        /url\(\s*(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^)\s'"]+))\s*\)/gi,
+        (m, dq, sq, bare) => {
+          const u = (dq ?? sq ?? bare ?? '') as string;
           const ref = localRef(u);
           return ref ? `url("${ref}")` : m;
         }
       );
       // @import "..."  (sin url())
-      out = out.replace(
-        /@import\s+(['"])([^'"]+)\1/gi,
-        (m, _q, u) => {
-          const ref = localRef(u);
-          return ref ? `@import "${ref}"` : m;
-        }
-      );
+      out = out.replace(/@import\s+(['"])([^'"]+)\1/gi, (m, _q, u) => {
+        const ref = localRef(u);
+        return ref ? `@import "${ref}"` : m;
+      });
       return out;
     };
-
-    const all = deepNodes(doc.body);
 
     const LINK_EXT = new Set(FILE);
     const hasFileExt = (url: string): boolean => {
@@ -184,7 +191,8 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       if (ref) el.setAttribute(attr, ref);
     };
 
-    for (const el of all) {
+    // Reescribe las referencias de UN elemento (atributos y style inline).
+    const processElement = (el: Element) => {
       const tag = el.tagName.toLowerCase();
 
       if (tag === 'img' || tag === 'source' || tag === 'video' ||
@@ -209,8 +217,8 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
         setRef(el, 'data');
       } else if (tag === 'link') {
         const rel = (el.getAttribute('rel') || '').toLowerCase();
-        if (rel.includes('stylesheet') || rel.includes('icon') || rel.includes('font'))
-          setRef(el, 'href');
+        // los favicon se descartan al serializar (no aportan y el servidor devuelve 404/HTML)
+        if (rel.includes('stylesheet') || rel.includes('font')) setRef(el, 'href');
       } else if (tag === 'a') {
         const href = el.getAttribute('href');
         if (href && hasFileExt(href)) setRef(el, 'href');
@@ -238,7 +246,190 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       if (style && style.includes('url(')) {
         el.setAttribute('style', rewriteCss(style));
       }
+    };
+
+    // ---- adoptedStyleSheets deduplicadas + reescritas ----
+    const sheets: string[] = [];
+    const sheetId = new Map<CSSStyleSheet, number>();
+    const processAdopted = (el: Element) => {
+      const sr = el.shadowRoot;
+      if (!sr) return;
+      const adopted = (sr as unknown as { adoptedStyleSheets?: CSSStyleSheet[] })
+        .adoptedStyleSheets;
+      if (!adopted || !adopted.length) return;
+      const ids: number[] = [];
+      for (const sheet of adopted) {
+        let id = sheetId.get(sheet);
+        if (id === undefined) {
+          let css = '';
+          try {
+            const rules = sheet.cssRules;
+            for (let i = 0; i < rules.length; i++) css += rules[i].cssText + '\n';
+          } catch {
+            css = '';
+          }
+          id = sheets.length;
+          sheets.push(rewriteCss(css));
+          sheetId.set(sheet, id);
+        }
+        ids.push(id);
+      }
+      el.setAttribute('data-adopted', ids.join(','));
+    };
+
+    // ---- serialización manual con Declarative Shadow DOM ----
+    const VOID = new Set([
+      'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
+      'link', 'meta', 'param', 'source', 'track', 'wbr',
+    ]);
+    const escText = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escAttr = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+    // panels capturados de las pestañas: se añaden tras el panel activo
+    const extraAfter = new Map<Element, string[]>();
+
+    const serialize = (node: Node): string => {
+      if (node.nodeType === Node.TEXT_NODE) return escText(node.nodeValue || '');
+      if (node.nodeType === Node.COMMENT_NODE) return '';
+      if (node.nodeType !== Node.ELEMENT_NODE) return '';
+      const el = node as Element;
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'noscript' || tag === 'iframe') return '';
+      if (tag === 'link' && /\bicon\b/i.test(el.getAttribute('rel') || '')) return '';
+
+      let out = '<' + tag;
+      const attrs = el.attributes;
+      for (let i = 0; i < attrs.length; i++) {
+        out += ' ' + attrs[i].name + '="' + escAttr(attrs[i].value) + '"';
+      }
+      out += '>';
+      if (VOID.has(tag)) return out;
+
+      if (el.shadowRoot) {
+        out += '<template shadowrootmode="open">';
+        const sk = el.shadowRoot.childNodes;
+        for (let i = 0; i < sk.length; i++) out += serialize(sk[i]);
+        out += '</template>';
+      }
+
+      if (tag === 'style') {
+        out += rewriteCss(el.textContent || '');
+      } else {
+        const kids = el.childNodes;
+        for (let i = 0; i < kids.length; i++) out += serialize(kids[i]);
+      }
+      out += '</' + tag + '>';
+      const extra = extraAfter.get(el);
+      if (extra) out += extra.join('');
+      return out;
+    };
+
+    // ---- pestañas: capturar el panel de cada pestaña ----
+    const tabStats = { widgets: 0, tabs: 0, captured: 0, failed: 0 };
+    const expandTabs = async () => {
+      const roots: ParentNode[] = [idoc];
+      for (const el of deepNodes(idoc.body)) if (el.shadowRoot) roots.push(el.shadowRoot);
+
+      for (const root of roots) {
+        const count = root.querySelectorAll('[role="tablist"]').length;
+        for (let li = 0; li < count; li++) {
+          const getList = () => root.querySelectorAll('[role="tablist"]')[li] as HTMLElement | undefined;
+          const getTabs = () =>
+            Array.from(getList()?.querySelectorAll('[role="tab"]') ?? []) as HTMLElement[];
+          // contenedor del widget = primer ancestro del tablist que contiene algún tabpanel
+          const getWidget = (): ParentNode | null => {
+            let cur: Element | null = getList() ?? null;
+            while (cur) {
+              if (cur.querySelector('[role="tabpanel"]')) return cur;
+              cur = cur.parentElement;
+            }
+            return root.querySelector('[role="tabpanel"]') ? root : null;
+          };
+          const getPanels = () =>
+            Array.from(getWidget()?.querySelectorAll('[role="tabpanel"]') ?? []);
+          const selectedIndex = () => getTabs().findIndex((t) => t.getAttribute('aria-selected') === 'true');
+
+          const tabs0 = getTabs();
+          if (tabs0.length < 2) continue;
+          tabStats.widgets++;
+          tabStats.tabs += tabs0.length;
+          if (getPanels().length >= tabs0.length) {
+            tabStats.captured += tabs0.length; // ya están todos en el DOM
+            continue;
+          }
+
+          const start = Math.max(0, selectedIndex());
+          const captured: Array<{ index: number; html: string }> = [];
+
+          for (let i = 0; i < tabs0.length; i++) {
+            if (i === start) continue;
+            try {
+              const btn = getTabs()[i];
+              if (!btn) throw new Error('pestaña desaparecida');
+              btn.click();
+              // espera real: pestaña seleccionada + panel con contenido
+              const t0 = Date.now();
+              while (Date.now() - t0 < 2500) {
+                const p = getPanels()[0];
+                if (selectedIndex() === i && p && (p.textContent || '').trim().length + p.querySelectorAll('*').length > 0) break;
+                await sleep(50);
+              }
+              await sleep(150); // imágenes/estilos del panel recién montado
+              const panel = getPanels()[0];
+              if (!panel || selectedIndex() !== i) throw new Error('el panel no cambió');
+              const pnodes = [panel, ...deepNodes(panel)];
+              pnodes.forEach(processElement);
+              pnodes.forEach(processAdopted);
+              let h = serialize(panel);
+              h = h.replace(
+                /^<([a-z0-9-]+)/i,
+                `<$1 data-ccna-tab="${i}" hidden style="display:none"`
+              );
+              captured.push({ index: i, html: h });
+              tabStats.captured++;
+            } catch {
+              tabStats.failed++;
+            }
+          }
+
+          // volver a la pestaña original
+          try {
+            const back = getTabs()[start];
+            if (back && selectedIndex() !== start) {
+              back.click();
+              const t0 = Date.now();
+              while (Date.now() - t0 < 2500 && selectedIndex() !== start) await sleep(50);
+              await sleep(150);
+            }
+          } catch {
+            // ignorar
+          }
+
+          const livePanel = getPanels()[0];
+          if (livePanel) {
+            livePanel.setAttribute('data-ccna-tab', String(start));
+            tabStats.captured++;
+            if (captured.length) {
+              captured.sort((a, b) => a.index - b.index);
+              extraAfter.set(livePanel, captured.map((c) => c.html));
+            }
+          } else {
+            tabStats.failed += captured.length;
+          }
+        }
+      }
+    };
+    try {
+      await expandTabs();
+    } catch {
+      tabStats.failed++;
     }
+
+    // <head> también: hojas de estilo enlazadas, etc.
+    const all = [...deepNodes(idoc.head ?? idoc.documentElement), ...deepNodes(idoc.body)];
+    for (const el of all) processElement(el);
 
     // ---- botones "open-dialog" que abren un PDF en un iframe ----
     // Emparejamos cada botón con el PDF del mismo widget Packet Tracer / content-links.
@@ -352,133 +543,21 @@ async function serializeChapterData(page: Page): Promise<ChapterData> {
       }
     }
 
-    // ---- adoptedStyleSheets deduplicadas + reescritas ----
-    const sheets: string[] = [];
-    const sheetId = new Map<CSSStyleSheet, number>();
-    for (const el of all) {
-      const sr = el.shadowRoot;
-      if (!sr) continue;
-      const adopted = (sr as unknown as { adoptedStyleSheets?: CSSStyleSheet[] })
-        .adoptedStyleSheets;
-      if (!adopted || !adopted.length) continue;
-      const ids: number[] = [];
-      for (const sheet of adopted) {
-        let id = sheetId.get(sheet);
-        if (id === undefined) {
-          let css = '';
-          try {
-            const rules = sheet.cssRules;
-            for (let i = 0; i < rules.length; i++) css += rules[i].cssText + '\n';
-          } catch {
-            css = '';
-          }
-          id = sheets.length;
-          sheets.push(rewriteCss(css));
-          sheetId.set(sheet, id);
-        }
-        ids.push(id);
-      }
-      el.setAttribute('data-adopted', ids.join(','));
-    }
+    for (const el of all) processAdopted(el);
 
-    // ---- serialización manual con Declarative Shadow DOM ----
-    const VOID = new Set([
-      'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input',
-      'link', 'meta', 'param', 'source', 'track', 'wbr',
-    ]);
-    const escText = (s: string) =>
-      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const escAttr = (s: string) =>
-      s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-
-    const serialize = (node: Node): string => {
-      if (node.nodeType === Node.TEXT_NODE) return escText(node.nodeValue || '');
-      if (node.nodeType === Node.COMMENT_NODE) return '';
-      if (node.nodeType !== Node.ELEMENT_NODE) return '';
-      const el = node as Element;
-      const tag = el.tagName.toLowerCase();
-      if (tag === 'script' || tag === 'noscript' || tag === 'iframe') return '';
-
-      let out = '<' + tag;
-      const attrs = el.attributes;
-      for (let i = 0; i < attrs.length; i++) {
-        out += ' ' + attrs[i].name + '="' + escAttr(attrs[i].value) + '"';
-      }
-      out += '>';
-      if (VOID.has(tag)) return out;
-
-      if (el.shadowRoot) {
-        out += '<template shadowrootmode="open">';
-        const sk = el.shadowRoot.childNodes;
-        for (let i = 0; i < sk.length; i++) out += serialize(sk[i]);
-        out += '</template>';
-      }
-
-      if (tag === 'style') {
-        out += rewriteCss(el.textContent || '');
-      } else {
-        const kids = el.childNodes;
-        for (let i = 0; i < kids.length; i++) out += serialize(kids[i]);
-      }
-      out += '</' + tag + '>';
-      return out;
-    };
-
-    const html = serialize(doc.documentElement);
+    const html = serialize(idoc.documentElement);
 
     return {
       ok: true,
-      title: doc.title || '',
-      lang: doc.documentElement.lang || 'es',
+      title: idoc.title || '',
+      lang: idoc.documentElement.lang || 'es',
       html,
       sheets,
       assets,
       subtopics,
+      tabs: tabStats,
     };
   });
-}
-
-async function downloadAsset(
-  page: Page,
-  absUrl: string,
-  dest: string
-): Promise<boolean> {
-  try {
-    const cookies = await page.cookies(absUrl).catch(() => []);
-    const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-    const res = await fetch(absUrl, {
-      headers: {
-        'User-Agent': UA,
-        Referer: 'https://www.netacad.com/',
-        ...(cookieHeader ? { Cookie: cookieHeader } : {}),
-      },
-    });
-    if (!res.ok || !res.body) return false;
-    await mkdir(dirname(dest), { recursive: true });
-    await pipeline(Readable.fromWeb(res.body as never), createWriteStream(dest));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function downloadAssets(
-  page: Page,
-  assets: Record<string, string>,
-  siteDir: string,
-  done: Map<string, boolean>
-): Promise<Set<string>> {
-  const failed = new Set<string>();
-  for (const [absUrl, rel] of Object.entries(assets)) {
-    if (done.has(rel)) {
-      if (!done.get(rel)) failed.add(rel);
-      continue;
-    }
-    const ok = await downloadAsset(page, absUrl, join(siteDir, rel));
-    done.set(rel, ok);
-    if (!ok) failed.add(rel);
-  }
-  return failed;
 }
 
 function buildStandaloneHtml(data: ChapterData): string {
@@ -614,7 +693,43 @@ function buildStandaloneHtml(data: ChapterData): string {
     }
   }
 
+  // Pestañas (tabs-view): en la web solo existía el panel activo; el descargador
+  // guardó el panel de cada pestaña con data-ccna-tab="N". Aquí se alternan.
+  function fixTabs() {
+    allRoots().forEach(function (root) {
+      var lists = root.querySelectorAll('[role="tablist"]');
+      lists.forEach(function (list) {
+        if (list.dataset.ccnaTabs) return;
+        var scope = list.getRootNode();
+        var panels = scope.querySelectorAll('[data-ccna-tab]');
+        if (!panels.length) return;
+        list.dataset.ccnaTabs = '1';
+        var btns = list.querySelectorAll('[role="tab"]');
+        btns.forEach(function (btn, idx) {
+          btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            var n = btn.getAttribute('data-index');
+            if (n === null || n === '') n = String(idx);
+            n = String(parseInt(n, 10));
+            scope.querySelectorAll('[data-ccna-tab]').forEach(function (p) {
+              var on = p.getAttribute('data-ccna-tab') === n;
+              if (on) { p.removeAttribute('hidden'); p.style.display = ''; }
+              else { p.setAttribute('hidden', ''); p.style.display = 'none'; }
+            });
+            btns.forEach(function (b, j) {
+              var sel = b === btn;
+              b.setAttribute('aria-selected', sel ? 'true' : 'false');
+              b.classList.toggle('isSelected', sel);
+            });
+          });
+        });
+      });
+    });
+  }
+
   function run() {
+    try { fixTabs(); } catch (e) {}
     try { fixVideos(); } catch (e) {}
     try { fixTranscripts(); } catch (e) {}
     try { fixPdfButtons(); } catch (e) {}
@@ -631,6 +746,12 @@ function buildStandaloneHtml(data: ChapterData): string {
 </script>`;
 
   let inner = data.html;
+  const meta = `<meta name="ccna-dl-format" content="${CHAPTER_FORMAT}">`;
+  if (/<head[^>]*>/i.test(inner)) {
+    inner = inner.replace(/<head[^>]*>/i, (m) => m + meta);
+  } else {
+    inner = inner.replace(/<html[^>]*>/i, (m) => m + '<head>' + meta + '</head>');
+  }
   if (/<\/body>/i.test(inner)) {
     inner = inner.replace(/<\/body>/i, loader + '</body>');
   } else {
@@ -696,27 +817,102 @@ function mergeSubtopics(a: Subtopic[], b: Subtopic[]): Subtopic[] {
   });
 }
 
+export type SaveChapterResult = {
+  ok: boolean;
+  title: string;
+  assets: number;
+  failed: number;
+  /** Rutas de assets no descargados -> motivo. */
+  failedAssets: Record<string, string>;
+  subtopics: Subtopic[];
+  /** Problemas de verificación del HTML guardado (vacío = todo bien). */
+  problems: string[];
+  warnings: string[];
+  tabs: { widgets: number; tabs: number; captured: number; failed: number };
+  reused: number;
+};
+
+/** Espera a que el DOM del iframe de contenido deje de cambiar (en vez de un sleep fijo). */
+export async function waitForContentStable(
+  page: Page,
+  quietMs = 250,
+  maxMs = 3000
+): Promise<boolean> {
+  let last = '';
+  let since = Date.now();
+  return waitUntil(
+    async () => {
+      const sig = await page.evaluate(() => {
+        const f = Array.from(document.querySelectorAll('iframe')).find((x) =>
+          (x.src || '').includes('authoring-resources')
+        ) as HTMLIFrameElement | undefined;
+        const d = f?.contentDocument;
+        if (!d || !d.body) return '';
+        let n = 0;
+        let imgsPending = 0;
+        const walk = (root: ParentNode) => {
+          const kids = root.querySelectorAll('*');
+          n += kids.length;
+          kids.forEach((el) => {
+            if (el.tagName === 'IMG' && !(el as HTMLImageElement).complete) imgsPending++;
+            if (el.shadowRoot) walk(el.shadowRoot);
+          });
+        };
+        walk(d);
+        return `${n}:${d.body.scrollHeight}:${imgsPending}`;
+      });
+      if (!sig || sig.endsWith(':') ) return false;
+      const pending = Number(sig.split(':')[2] || 0);
+      if (sig !== last) {
+        last = sig;
+        since = Date.now();
+        return false;
+      }
+      return pending === 0 && Date.now() - since >= quietMs;
+    },
+    maxMs,
+    100
+  );
+}
+
 export async function saveChapterHtml(
   page: Page,
   filePath: string,
   siteDir: string,
   done: Map<string, boolean>,
-  chapterId?: string
-): Promise<{
-  ok: boolean;
-  title: string;
-  assets: number;
-  failed: number;
-  subtopics: Subtopic[];
-}> {
+  chapterId?: string,
+  assetOpts: AssetOptions = DEFAULT_ASSET_OPTIONS,
+  assetReasons: Map<string, string> = new Map()
+): Promise<SaveChapterResult> {
+  const none = (title = ''): SaveChapterResult => ({
+    ok: false,
+    title,
+    assets: 0,
+    failed: 0,
+    failedAssets: {},
+    subtopics: [],
+    problems: [],
+    warnings: [],
+    tabs: { widgets: 0, tabs: 0, captured: 0, failed: 0 },
+    reused: 0,
+  });
+
   await scrollLaunchContent(page);
-  await delay(400);
+  await waitForContentStable(page);
   const data = await serializeChapterData(page);
   if (!data.ok || data.html.length < 200) {
-    return { ok: false, title: data.title, assets: 0, failed: 0, subtopics: [] };
+    return { ...none(data.title), problems: ['no se encontró el contenido del capítulo (iframe vacío)'] };
   }
 
-  const failed = await downloadAssets(page, data.assets, siteDir, done);
+  const batch = await downloadAssets(
+    page,
+    data.assets,
+    siteDir,
+    done,
+    assetOpts,
+    assetReasons
+  );
+  const failed = batch.failed;
 
   // Revertir a URL absoluta los recursos que no se pudieron descargar.
   if (failed.size) {
@@ -724,7 +920,7 @@ export async function saveChapterHtml(
     for (const [absUrl, rel] of Object.entries(data.assets)) invert[rel] = absUrl;
     const fixRef = (s: string): string => {
       let out = s;
-      for (const rel of failed) {
+      for (const rel of failed.keys()) {
         const abs = invert[rel];
         if (!abs) continue;
         out = out.split('../' + rel).join(abs);
@@ -736,6 +932,19 @@ export async function saveChapterHtml(
   }
 
   const docHtml = buildStandaloneHtml(data);
+
+  // Verificación previa a escribir: contenido no vacío, sin spinner/errores.
+  const check = verifyChapterHtml(docHtml);
+  if (!check.ok && check.textLength < 80) {
+    // no se sobrescribe un buen archivo anterior con una página vacía
+    return {
+      ...none(data.title),
+      problems: check.problems,
+      warnings: check.warnings,
+      tabs: data.tabs,
+    };
+  }
+  await mkdir(join(siteDir, 'chapters'), { recursive: true });
   await writeFile(filePath, docHtml, 'utf8');
 
   let subtopics = filterSubtopics(data.subtopics);
@@ -744,12 +953,41 @@ export async function saveChapterHtml(
     subtopics = mergeSubtopics(subtopics, fromOutline);
   }
 
+  const warnings = [...check.warnings];
+  // Recursos que el servidor dice que no existen (404/410, o 403 cuando el resto de recursos
+  // sí se descargó, es decir, la sesión es válida): son referencias rotas del propio curso
+  // (p.ej. imágenes de fondo de los cuestionarios). Reintentar no sirve: se anotan como
+  // aviso y NO marcan el capítulo como parcial (si no, cada ejecución lo repetiría).
+  const totalAssets = Object.keys(data.assets).length;
+  const sessionOk = totalAssets - failed.size > 0;
+  const missingOnServer: string[] = [];
+  for (const [rel, why] of [...failed.entries()]) {
+    if (/^HTTP (404|410)\b/.test(why) || (sessionOk && /^HTTP 403\b/.test(why))) {
+      missingOnServer.push(why.replace(/^HTTP \d+ \(?/, '').replace(/\)$/, '').slice(0, 140));
+      failed.delete(rel);
+    }
+  }
+  if (missingOnServer.length) {
+    warnings.push(
+      `${missingOnServer.length} recurso(s) no existen en el servidor (404/403, referencias rotas del curso; no se reintentan): ` +
+        [...new Set(missingOnServer)].slice(0, 2).join(' | ')
+    );
+  }
+  if (data.tabs.failed > 0) {
+    warnings.push(`${data.tabs.failed} pestaña(s) no se pudieron capturar (${data.tabs.captured}/${data.tabs.tabs})`);
+  }
+
   return {
-    ok: true,
+    ok: check.ok,
     title: data.title,
     assets: Object.keys(data.assets).length,
     failed: failed.size,
+    failedAssets: Object.fromEntries(failed),
     subtopics,
+    problems: check.problems,
+    warnings,
+    tabs: data.tabs,
+    reused: batch.reused,
   };
 }
 
