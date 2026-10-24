@@ -4,8 +4,10 @@
 # Build
 /lib/
 
-# Env files
+# Variables de entorno (contienen credenciales). Usa .env.example como plantilla.
 .env
+.env.*
+!.env.example
 
 # Deps
 node_modules/
@@ -30,3 +32,17 @@ pnpm-debug.log*
 
 # Misc
 .DS_Store
+
+# Cursos descargados: carpetas <uuid>_<titulo> (HTML, assets, resumenes) y PDFs generados
+/[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-*/
+/*.pdf
+
+# Informes y archivos de depuracion generados
+/validation-report.md
+/validation.json
+/downloads-failures.json
+/descarga-resumen.json
+/descarga-fallos.json
+/course.png
+/debug-*.png
+/scratch/

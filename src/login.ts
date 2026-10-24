@@ -1,8 +1,10 @@
 import { HTTPResponse, Page, Target } from 'puppeteer';
 import { catchedRace, delay } from './util/promise';
+import { waitUntil } from './util/retry';
 import { waitForSpinners } from './wait-for-spinners';
 
 export async function login(page: Page, user: string, password: string) {
+  console.log("Login Page Loaded");
   const userElm = await page.$('input[name="username"]');
   if (!userElm) throw 'Username input not found.';
   await userElm.type(user);
@@ -32,7 +34,7 @@ export async function login(page: Page, user: string, password: string) {
       );
 
   // handle multiple scenarios
-  nextBtn.click();
+  nextBtn.click().catch(() => undefined);
   let nextThing = await catchedRace([
     waitForNav(),
     waitForCookies(),
@@ -43,7 +45,7 @@ export async function login(page: Page, user: string, password: string) {
     const page = await nextThing.page();
     page && (await page.close());
 
-    nextBtn.click();
+    nextBtn.click().catch(() => undefined);
     nextThing = await catchedRace([waitForNav(), waitForCookies()]);
   }
 
@@ -54,12 +56,13 @@ export async function login(page: Page, user: string, password: string) {
       await savePrefsBtn.click();
       await delay(1000);
 
-      nextBtn.click();
-      await waitForNav();
+      // se registra la espera ANTES del clic para no perder la navegación
+      await Promise.all([waitForNav(), nextBtn.click()]);
     }
   }
 
-  await delay(2000);
+  // en cuanto aparece el campo de contraseña seguimos (máx. 2 s, como antes)
+  await waitUntil(async () => !!(await page.$('input[name="password"]')), 2000, 100);
   await waitForSpinners(page);
 
   const pwElm = await page.$('input[name="password"]');
@@ -68,7 +71,28 @@ export async function login(page: Page, user: string, password: string) {
 
   const submitBtn = await page.$('input[name="login"]');
   if (!submitBtn) throw 'Login submit button not found.';
-  submitBtn.click();
-
-  await page.waitForNavigation({ waitUntil: 'networkidle2' });
+  console.log("Credentials Submitted");
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle2' }),
+    submitBtn.click(),
+  ]);
+  console.log("Navigation Completed");
+  // resultado conocido (dashboard o error) en cuanto aparece; máx. 5 s como antes
+  await waitUntil(
+    async () =>
+      page.url().includes('dashboard') ||
+      (await page.content()).includes('Invalid username or password.'),
+    5000,
+    200
+  );
+  if((await page.content()).includes('Invalid username or password.')){
+    throw 'Invalid username or password.';
+  }
+  else if((await page.url()).includes('dashboard')){
+    console.log("Login Successful");
+  }
+  else{
+    throw 'Login Failed';
+  }
+  //console.log(await page.content());
 }
