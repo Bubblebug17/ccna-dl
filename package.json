@@ -31,7 +31,6 @@
     "cmd-ts": "^0.13.0",
     "dotenv": "^16.4.5",
     "inquirer": "^8.2.2",
-    "muhammara": "^5.4.0",
     "puppeteer": "^22.8.0",
     "sanitize-filename": "^1.6.3"
   },
@@ -45,7 +44,8 @@
   "keywords": [
     "cisco",
     "ccna",
-    "pdf",
+    "html",
+    "offline",
     "download"
   ],
   "bugs": {

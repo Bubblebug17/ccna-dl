@@ -1,4 +1,4 @@
-import { Page, PDFOptions } from 'puppeteer';
+import { Page } from 'puppeteer';
 import { delay } from './util/promise';
 import { waitForContentStable } from './content-probe';
 import { getWaitPolicy } from './wait-policy';
@@ -292,134 +292,6 @@ async function waitForLaunchChapterContent(page: Page): Promise<boolean> {
   return false;
 }
 
-async function multiImagesToPdf(
-  page: Page,
-  imagesBase64: string[],
-  options: PDFOptions
-): Promise<Buffer> {
-  const imgs = imagesBase64
-    .map(
-      (b64) =>
-        `<img src="data:image/jpeg;base64,${b64}" style="display:block;width:100%;page-break-after:always">`
-    )
-    .join('');
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-    *{margin:0;padding:0}
-  </style></head><body>${imgs}</body></html>`;
-
-  const shotPage = await page.browser().newPage();
-  try {
-    await shotPage.setContent(html, { waitUntil: 'networkidle0' });
-    return shotPage.pdf(options) as Promise<Buffer>;
-  } finally {
-    await shotPage.close();
-  }
-}
-
-// El contenido vive en un iframe same-origin cuyo tamaño controla la propia
-// app (no respeta cambios de altura). Por eso, en lugar de expandir el iframe,
-// hacemos scroll DENTRO de él y capturamos el viewport por tramos, que sí se
-// renderizan correctamente. Luego unimos los tramos en un PDF paginado.
-export async function captureLaunchChapterPdf(
-  page: Page,
-  options: PDFOptions,
-  debugChapter?: string
-): Promise<Buffer> {
-  // No ocultamos sidebar/topbar: hacerlo colapsa el grid del contenedor y deja
-  // el iframe en 0x0. Como recortamos al cuadro del iframe, las barras quedan
-  // fuera automáticamente.
-  const info = await page.evaluate(() => {
-    const iframe = (Array.from(document.querySelectorAll('iframe')).find((f) =>
-      (f.src || '').includes('authoring-resources')
-    ) as HTMLIFrameElement | undefined) ?? null;
-    if (!iframe) return null;
-    const r = iframe.getBoundingClientRect();
-    let innerH = 0;
-    try {
-      innerH = iframe.contentDocument?.documentElement.scrollHeight ?? 0;
-    } catch {
-      innerH = 0;
-    }
-    return { x: r.x, y: r.y, w: r.width, h: r.height, innerH };
-  });
-
-  if (!info || info.innerH < 200 || info.h < 100) {
-    console.warn(
-      `  · captura: iframe no medible (${JSON.stringify(info)}), usando PDF directo`
-    );
-    await page.emulateMediaType('screen');
-    return page.pdf(options) as Promise<Buffer>;
-  }
-
-  const viewH = Math.floor(info.h);
-  const total = info.innerH;
-  const slices: string[] = [];
-
-  for (let pos = 0; pos < total && slices.length < 30; pos += viewH) {
-    await page.evaluate((p) => {
-      const f = (Array.from(document.querySelectorAll('iframe')).find((x) =>
-        (x.src || '').includes('authoring-resources')
-      ) as HTMLIFrameElement | undefined) ?? null;
-      f?.contentWindow?.scrollTo(0, p);
-    }, pos);
-    await delay(550);
-
-    const box = await page.evaluate(() => {
-      const f = (Array.from(document.querySelectorAll('iframe')).find((x) =>
-        (x.src || '').includes('authoring-resources')
-      ) as HTMLIFrameElement | undefined) ?? null;
-      if (!f) return null;
-      const r = f.getBoundingClientRect();
-      return { x: r.x, y: r.y, w: r.width, h: r.height };
-    });
-    if (!box) break;
-
-    const remaining = total - pos;
-    const clipH = Math.max(1, Math.min(box.h, remaining));
-    const shot = (await page.screenshot({
-      type: 'jpeg',
-      quality: 80,
-      clip: {
-        x: Math.max(0, box.x),
-        y: Math.max(0, box.y),
-        width: box.w,
-        height: clipH,
-      },
-    })) as Buffer;
-    slices.push(shot.toString('base64'));
-  }
-
-  await page
-    .evaluate(() => {
-      const f = (Array.from(document.querySelectorAll('iframe')).find((x) =>
-        (x.src || '').includes('authoring-resources')
-      ) as HTMLIFrameElement | undefined) ?? null;
-      f?.contentWindow?.scrollTo(0, 0);
-    })
-    .catch(() => undefined);
-
-  console.log(`  · captura: ${slices.length} tramos`);
-
-  if (debugChapter && slices.length) {
-    try {
-      const fs = require('fs') as typeof import('fs');
-      fs.writeFileSync(
-        `debug-slice-${debugChapter}.jpg`,
-        new Uint8Array(Buffer.from(slices[0], 'base64'))
-      );
-    } catch {
-      // ignore
-    }
-  }
-
-  if (slices.length === 0) {
-    await page.emulateMediaType('screen');
-    return page.pdf(options) as Promise<Buffer>;
-  }
-
-  return multiImagesToPdf(page, slices, options);
-}
-
 /** Vuelve a la vista curriculum estable tras escanear el outline (muchos clics). */
 export async function restoreLaunchCurriculumPage(
   page: Page,
@@ -454,6 +326,5 @@ export async function gotoChapter(
     waitUntil: 'domcontentloaded',
     timeout: 90_000,
   });
-  // dejar arrancar la SPA; las esperas por condición están en waitForChapterContent
-  await delay(Math.min(800, getWaitPolicy().minWaitMs));
+  // sin espera fija: waitForChapterContent ya exige la URL estable (shellStableMs) y el contenido asentado
 }

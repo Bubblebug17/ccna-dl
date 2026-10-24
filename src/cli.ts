@@ -15,17 +15,11 @@ import {
 import { existsSync, readFileSync } from 'fs';
 import { join, resolve as resolvePath } from 'path';
 import { spawnSync } from 'child_process';
-import puppeteer, { Page, PaperFormat } from 'puppeteer';
-// @ts-ignore
-import { _paperFormats as paperFormats } from 'puppeteer-core';
-import { delay, promisePool } from './util/promise';
-import { fmtDuration, waitUntil } from './util/retry';
-import { mkdir, rm, writeFile } from 'fs/promises';
-import * as muhammara from 'muhammara';
-import * as cliProgress from 'cli-progress';
+import puppeteer, { Page } from 'puppeteer';
+import { delay } from './util/promise';
+import { waitUntil } from './util/retry';
+import { mkdir } from 'fs/promises';
 import * as inquirer from 'inquirer';
-import { hasOwnProperty } from './util/object';
-import { expandCarousels } from './expand-carousels';
 import { waitForSpinners } from './wait-for-spinners';
 import {
   gotoChapter,
@@ -53,11 +47,10 @@ import {
 import { chromeLaunchArgs } from './browser-args';
 import { DEFAULT_RECYCLE_EVERY, DEFAULT_TABS, planTabs } from './memory';
 import { DEFAULT_ASSET_OPTIONS } from './download-assets';
-import sanitize = require('sanitize-filename');
+import { DEBUG_DIR } from './save-chapter-html';
+import { removedFlagErrors } from './removed-flags';
 import { login } from './login';
 import { buildLaunchUrl, getChapterUrls } from './get-chapters';
-import { urlToChapter as urlToChapterId } from './url-to-chapter-id';
-import { solveQuizzes } from './solve-quizzes';
 
 const { version } = JSON.parse(
   readFileSync(join(__dirname, '../package.json')).toString()
@@ -93,8 +86,7 @@ const cmd = command({
       type: optional(number),
       description:
         'Páginas descargadas a la vez. Cursos "launch" (HTML offline): pestañas del navegador en paralelo, máximo 6; ' +
-        `por defecto ${DEFAULT_TABS} (o menos si hay poca RAM libre). Cada pestaña puede usar ~1 GB; se avisa si no caben en la RAM libre. ` +
-        'Modo PDF antiguo: por defecto 10.',
+        `por defecto ${DEFAULT_TABS} (o menos si hay poca RAM libre). Cada pestaña puede usar ~1 GB; se avisa si no caben en la RAM libre.`,
     }),
     outDir: option({
       long: 'out-dir',
@@ -102,17 +94,6 @@ const cmd = command({
       type: string,
       defaultValue: () => '.',
       description: 'The directory, the item should be saved into.',
-    }),
-    format: option({
-      long: 'format',
-      type: optional(string),
-      description: 'A puppeteer page format like "a4".',
-    }),
-    timeout: option({
-      long: 'timeout',
-      short: 't',
-      type: optional(number),
-      description: 'Terminates the download, when exceeded.',
     }),
     only: option({
       long: 'only',
@@ -180,39 +161,33 @@ const cmd = command({
         'Cada cuántos capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria del navegador ' +
         `(0 = nunca; por defecto ${DEFAULT_RECYCLE_EVERY}). También se recicla antes si el heap de JS es alto o queda poca RAM libre.`,
     }),
-    blockMedia: flag({
-      long: 'block-media',
-      description:
-        'Bloquea vídeo/audio (mp4, webm, mp3…) en el navegador para ahorrar memoria. Por defecto NO se bloquea, porque los reproductores necesitan cargar el vídeo para poder guardarlo. Con esta opción los vídeos no se pueden capturar (se guarda solo el póster).',
-    }),
     noVideos: flag({
       long: 'no-videos',
       description:
-        'No activar los reproductores de vídeo ni descargar vídeos/subtítulos (solo se guarda el póster). Más rápido y ligero; una ejecución posterior sin esta opción solo repite los capítulos que tienen vídeos.',
+        'No activar los reproductores de vídeo ni descargar vídeos/subtítulos (solo se guarda el póster) y bloquear vídeo/audio en el navegador. Más rápido y ligero; una ejecución posterior sin esta opción solo repite los capítulos que tienen vídeos.',
     }),
     noAnimations: flag({
       long: 'no-animations',
       description:
         'No grabar las animaciones interactivas (Adobe Animate/CreateJS: canvas con botón play y barra). Por defecto se pulsa play y se graba cada una en un webm para verla sin conexión.',
     }),
-    dumpNetwork: flag({
-      long: 'dump-network',
+    debugNetwork: flag({
+      long: 'debug-network',
       description:
-        'Diagnóstico: guarda <curso>/debug-red-<capítulo>.json con las peticiones de red del capítulo y los componentes de animación detectados (sin cookies, cabeceras ni tokens). Úsalo con --only para un capítulo.',
+        'Depuración: guarda <curso>/debug/red-<capítulo>.json con las peticiones de red del capítulo y los componentes de animación detectados (sin cookies, cabeceras ni tokens). Úsalo con --only para un capítulo.',
     }),
     noBlockTrackers: flag({
       long: 'no-block-trackers',
       description:
         'No bloquear analítica/publicidad/seguimiento (Google Analytics, DoubleClick, Hotjar…) en el navegador.',
     }),
-    screenshot: flag({
-      long: 'screenshot',
-      description: 'Guarda course.png (captura de depuración de la vista del curso).',
+    debugScreenshot: flag({
+      long: 'debug-screenshot',
+      description: 'Depuración: guarda <curso>/debug/course.png (captura de la vista del curso tras el login).',
     }),
-    headful: flag({
-      long: 'headful',
-      description:
-        'Run the browser with a visible window (more reliable for the new NetAcad UI).',
+    debugHeadful: flag({
+      long: 'debug-headful',
+      description: 'Depuración: abre el navegador con ventana visible para ver lo que hace.',
     }),
   },
   handler: async (args) => {
@@ -227,17 +202,16 @@ const cmd = command({
     }
     const user: string = args.user;
 
-    if (args.format && !hasOwnProperty(paperFormats, args.format)) {
-      console.error(
-        `Invalid page format specified. Possible options are: ${JSON.stringify(
-          Object.keys(paperFormats)
-        )}`
-      );
-      return;
-    }
-
     if (args.urls.length < 1) {
       console.error('Please specify at least one url leading to a course.');
+      return;
+    }
+    const notLaunch = args.urls.filter((u) => !/\/launch\b/.test(u));
+    if (notLaunch.length) {
+      console.error(
+        `Solo se admiten cursos "launch" (https://www.netacad.com/.../launch?id=…). La interfaz clásica (descarga a PDF) ya no existe y se quitó: ${notLaunch.join(', ')}`
+      );
+      process.exitCode = 2;
       return;
     }
 
@@ -267,13 +241,13 @@ const cmd = command({
       }
     }
 
-    const waitPolicy = setWaitPolicy({
+    setWaitPolicy({
       fast: args.fast,
       minWaitMs: args.minWait,
     });
     const blockPatterns = [
       ...(args.noBlockTrackers ? [] : TRACKER_PATTERNS),
-      ...(args.blockMedia ? MEDIA_PATTERNS : []),
+      ...(args.noVideos ? MEDIA_PATTERNS : []),
       ...(args.fast ? AGGRESSIVE_PATTERNS : []),
     ];
     // pestañas en paralelo: por defecto min(2, las que caben en la RAM libre); entre 1 y 6
@@ -286,14 +260,13 @@ const cmd = command({
     else if (plan.auto) {
       console.log(`Pestañas en paralelo: ${tabs} (automático; RAM libre ~${(plan.freeMb / 1024).toFixed(1)} GB de ${(plan.totalMb / 1024).toFixed(1)} GB). Cambia con --concurrency.`);
     }
-    void waitPolicy;
 
     const browser = await puppeteer.launch({
-      headless: args.headful ? false : true,
+      headless: !args.debugHeadful,
       protocolTimeout: 600_000,
       args: [
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        ...chromeLaunchArgs({ headful: args.headful }),
+        ...chromeLaunchArgs({ headful: args.debugHeadful }),
       ],
     });
 
@@ -355,17 +328,13 @@ const cmd = command({
 
           courseTitle = await getCourseTitle(sessionPage);
           console.log('Course Title: ' + courseTitle);
-          if (args.screenshot) await sessionPage.screenshot({ path: 'course.png' });
           const isLaunchUrl = /\/launch\b/.test(url);
-          const courseIdEarly =
-            (() => {
-              try {
-                return new URL(url).searchParams.get('id') ?? undefined;
-              } catch {
-                return undefined;
-              }
-            })() ?? url.match(/[0-9]+/)?.at(0);
+          const courseIdEarly = courseIdOf(url);
           const siteDir = courseIdEarly ? courseSiteDir(args.outDir, courseIdEarly, courseTitle) : undefined;
+          if (args.debugScreenshot && siteDir) {
+            await mkdir(join(siteDir, DEBUG_DIR), { recursive: true });
+            await sessionPage.screenshot({ path: join(siteDir, DEBUG_DIR, 'course.png') });
+          }
 
           let fromCache = false;
           urls = [];
@@ -424,14 +393,7 @@ const cmd = command({
         const launchCourse =
           urls.length > 0 && urls.every(isLaunchChapterUrl);
 
-        const courseId =
-          (() => {
-            try {
-              return new URL(url).searchParams.get('id') ?? undefined;
-            } catch {
-              return undefined;
-            }
-          })() ?? url.match(/[0-9]+/)?.at(0);
+        const courseId = courseIdOf(url);
         if (!courseId) throw `No course id found in url: ${url}`;
 
         if (launchCourse) {
@@ -472,7 +434,7 @@ const cmd = command({
               recycleEvery: Math.max(0, Math.floor(args.recycleEvery)),
               videos: !args.noVideos,
               animations: !args.noAnimations,
-              dumpNetwork: args.dumpNetwork,
+              debugNetwork: args.debugNetwork,
               newPage: newWorkerPage,
               chapterTimeoutMs: Math.max(10, args.chapterTimeout) * 1000,
               signal: abort.signal,
@@ -481,8 +443,7 @@ const cmd = command({
               prepareChapter: async (p, chapterUrl) => {
                 await gotoChapter(p, chapterUrl);
                 await dismissCookieBanner(p);
-                await waitForChapterContent(p, chapterUrl);
-                await waitForSpinners(p).catch(() => undefined);
+                await waitForChapterContent(p, chapterUrl); // incluye loaders/spinners, red, DOM estable y --min-wait
               },
               assetOpts: {
                 ...DEFAULT_ASSET_OPTIONS,
@@ -501,80 +462,25 @@ const cmd = command({
           continue;
         }
 
-        // Legacy UI: descarga a PDF y los une en un único archivo.
-        console.log('Downloading chapters.');
-        const saveDir = join(args.outDir, courseId);
-        await rm(saveDir, { recursive: true, force: true });
-        await mkdir(saveDir, { recursive: true });
-
-        let outFiles = new Array(urls.length);
-
-        const bar = new cliProgress.SingleBar(
-          {},
-          cliProgress.Presets.shades_classic
-        );
-        bar.start(urls.length, 0);
-        const barUpdater = setInterval(() => bar.updateETA(), 1000);
-
+        console.error(`No es un curso "launch" (HTML offline): ${url}. La interfaz clásica de Netacad (descarga a PDF) ya no existe y se quitó.`);
         await sessionPage.close().catch(() => undefined);
-        try {
-          await promisePool(
-            async (i) => {
-              const chapterUrl = urls[i];
-              const chapterPage = await browser.newPage();
-              try {
-                await chapterPage.goto(chapterUrl, { waitUntil: 'networkidle2' });
-                await waitForChapterContent(chapterPage, chapterUrl);
-                await waitForSpinners(chapterPage).catch(() => undefined);
-                await expandCarousels(chapterPage);
-                await solveQuizzes(chapterPage);
-
-                const chapter = urlToChapterId(chapterUrl).replace(/\.1$/, '');
-                const outFile = join(saveDir, `${chapter}.pdf`);
-                const buf = (await chapterPage.pdf({
-                  format: (args.format as PaperFormat | undefined) ?? 'a4',
-                  landscape: false,
-                  margin: { top: 0, right: 0, bottom: 0, left: 0 },
-                  scale: 0.6,
-                  printBackground: true,
-                  displayHeaderFooter: false,
-                  timeout: args.timeout,
-                })) as Buffer;
-                await writeFile(outFile, new Uint8Array(buf));
-                outFiles[i] = outFile;
-                bar.increment();
-              } finally {
-                await chapterPage.close();
-              }
-            },
-            args.concurrency ?? 10,
-            urls.length
-          );
-        } finally {
-          clearInterval(barUpdater);
-          bar.stop();
-        }
-
-        console.log('Merging pdfs.');
-        const mergedPdf = join(
-          args.outDir,
-          `${courseId}_${sanitize(courseTitle)}.pdf`
-        );
-        const writeStream = new muhammara.PDFWStreamForFile(mergedPdf);
-        const writer = muhammara.createWriter(writeStream);
-        for (const outFile of outFiles) {
-          writer.appendPDFPagesFromPDF(outFile);
-        }
-        writer.end();
-        await new Promise<void>((resolve) => writeStream.close(resolve));
-        await rm(saveDir, { recursive: true });
-        console.log(`Success. File: ${mergedPdf}`);
+        process.exitCode = 1;
       }
     } finally {
       await browser?.close();
     }
   },
 });
+
+function courseIdOf(url: string): string | undefined {
+  try {
+    const id = new URL(url).searchParams.get('id');
+    if (id) return id;
+  } catch {
+    // no es una URL
+  }
+  return url.match(/[0-9]+/)?.at(0);
+}
 
 /** Ejecuta scripts/validate-download.js (sin login, sin red) sobre outDir. */
 function runValidator(outDir: string): number {
@@ -640,4 +546,11 @@ async function getCourseTitle(page: Page): Promise<string> {
   return 'Unknown';
 }
 
-run(cmd, process.argv.slice(2));
+const argv = process.argv.slice(2);
+const removed = removedFlagErrors(argv);
+if (removed.length) {
+  for (const m of removed) console.error(m);
+  process.exitCode = 2;
+} else {
+  run(cmd, argv);
+}

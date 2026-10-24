@@ -10,7 +10,7 @@ This downloader seems to be broken by now ([#1](/../../issues/1)). I won't fix i
 
 - download the whole course contents
 - clicks through carousels and stacks their contents
-- videos and interactive animations (`<adobe-animate-view>`, e.g. 2.3.2 "OSPF designated router") are recorded so that they play offline (see `--no-videos`, `--no-animations`, `--dump-network` and [DOCUMENTACION.md](./DOCUMENTACION.md) §7.6)
+- videos and interactive animations (`<adobe-animate-view>`, e.g. 2.3.2 "OSPF designated router") are recorded so that they play offline (see `--no-videos`, `--no-animations`, `--debug-network` and [DOCUMENTACION.md](./DOCUMENTACION.md) §7.6)
 
 ## Run this tool
 
@@ -38,16 +38,18 @@ descarga de recursos). Por eso la descarga en paralelo usa **varias pestañas de
 | --- | --- | --- |
 | `--concurrency N` | `2` (o menos si hay poca RAM libre; máx. 6) | Capítulos que se descargan a la vez (pestañas en paralelo). `1` = secuencial como antes. Cada pestaña puede usar ~1 GB de RAM; si `N` no cabe en la RAM libre se avisa. |
 | `--recycle-every N` | `8` | Cada `N` capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria de Chrome (`0` = nunca). También se recicla antes si el heap de JS pasa de ~600 MB o queda poca RAM libre. |
-| `--block-media` | desactivado | Opcional: el navegador **no carga** vídeo/audio (mp4, webm, mp3…) para ahorrar memoria. Por defecto **se cargan**, porque el reproductor tiene que arrancar para que se pueda descargar el vídeo (ver `--no-videos`). |
 | `--no-videos` | desactivado | No intenta capturar los vídeos (se queda el póster, como antes). Los capítulos guardados así se marcan con formato 2 y no se rehacen por tener vídeos pendientes. |
 | `--no-animations` | desactivado | No pulsa «play» en las animaciones interactivas (`<adobe-animate-view>`: canvas pintado por JS) ni las graba. Sin esto se graba cada animación como vídeo `.webm` local (hasta 90 s por animación) y el capítulo se repite al reanudar si la animación quedó sin grabar. |
 | *(automático)* | — | Los gráficos dinámicos anidados en pestañas (p. ej. 1.3.3) se guardan con sus hojas de estilo aplicadas; los capítulos descargados con una versión anterior se detectan y se repiten al reanudar o con `--force --only X.Y`. |
-| `--dump-network` | desactivado | Diagnóstico: escribe `<curso>/debug-red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red vistas al activarlos (**sin cookies, cabeceras ni valores de query**: solo los nombres de los parámetros). |
+| `--debug-network` | desactivado | Depuración: escribe `<curso>/debug/red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red vistas al activarlos (**sin cookies, cabeceras ni valores de query**: solo los nombres de los parámetros). |
 | `--min-wait ms` | `1500` | Espera mínima de asentamiento, **además** de las condiciones (sin spinner/esqueleto, DOM estable, imágenes y red en reposo). Súbela (p. ej. `2500`) si tu conexión es lenta. |
 | `--chapter-timeout s` | `300` | Tiempo máximo por intento de capítulo; al agotarse se reinicia la pestaña y se reintenta. |
 | `--fast` | desactivado | Modo agresivo (opt-in): esperas mínimas más cortas y bloquea también `adobedtm`. |
 | `--no-block-trackers` | bloqueo activo | No bloquear analíticas/publicidad (por defecto no se cargan; no afectan al contenido). |
-| `--screenshot` | desactivado | Guarda la captura de depuración `course.png`. |
+| `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png`. |
+| `--debug-headful` | desactivado | Depuración: navegador con ventana visible. |
+
+Opciones renombradas (dan error con el nombre nuevo): `--dump-network` → `--debug-network`, `--screenshot` → `--debug-screenshot`, `--headful` → `--debug-headful`. Quitadas: `--format`, `--timeout`/`-t` (modo PDF de la interfaz clásica, que ya no existe) y `--block-media` (lo hace `--no-videos`). Solo se admiten cursos `launch`.
 
 - **Vídeos**: el programa pulsa «play» en cada reproductor, lee la fuente real (mp4 firmado o HLS/DASH), la descarga y la sustituye por un `<video controls>` local con póster y subtítulos (`.vtt` incrustado). Los vídeos en *streaming* (`.m3u8`/`.mpd`) necesitan **ffmpeg** instalado (o `FFMPEG_PATH`). No verificado con Netacad real; ver `DOCUMENTACION.md` §12.
 - **Capítulos/subtemas inexistentes**: las IP del texto (`10.1.0.0/16`) ya no se toman por subtemas, y los cuestionarios `X.Y.1` ya no pisan la sección `X.Y`. Para limpiar descargas anteriores: `node scripts/clean-fake-chapters.js` (simulación) y `--apply`.

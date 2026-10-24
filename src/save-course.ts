@@ -11,7 +11,7 @@ import {
   saveChapterHtml,
   SaveChapterResult,
 } from './save-chapter-html';
-import { AssetOptions, DEFAULT_ASSET_OPTIONS } from './download-assets';
+import { AssetOptions } from './download-assets';
 import { chapterUpToDate, verifyChapterFile } from './verify-chapter';
 import {
   ChapterOutcome,
@@ -75,8 +75,8 @@ export type SaveCourseOptions = {
   videos?: boolean;
   /** Graba las animaciones interactivas (canvas + play + deslizador) para verlas sin conexión (por defecto sí; false = --no-animations). */
   animations?: boolean;
-  /** Guarda `debug-red-<capítulo>.json` por capítulo (peticiones sin cookies/tokens + componentes detectados). */
-  dumpNetwork?: boolean;
+  /** Guarda `debug/red-<capítulo>.json` por capítulo (peticiones sin cookies/tokens + componentes detectados). */
+  debugNetwork?: boolean;
   /** Tiempo máximo de grabación por animación (ms). */
   animationMaxMs?: number;
 };
@@ -296,7 +296,7 @@ export async function saveLaunchCourseSite(
               prescrolled: !!opts.prepareScrolls,
               videos: wantVideos,
               animations: wantAnimations,
-              dumpNetwork: opts.dumpNetwork,
+              debugNetwork: opts.debugNetwork,
               animationMaxMs: opts.animationMaxMs,
             });
             // Carga sin terminar al guardar (loader/skeleton visible): recarga y re-captura UNA vez, con más paciencia.
@@ -308,7 +308,7 @@ export async function saveLaunchCourseSite(
                 prescrolled: !!opts.prepareScrolls,
                 videos: wantVideos,
                 animations: wantAnimations,
-                dumpNetwork: opts.dumpNetwork,
+                debugNetwork: opts.debugNetwork,
                 animationMaxMs: opts.animationMaxMs,
                 patient: true,
               });

@@ -16,6 +16,9 @@ import { inlineLocalTracks } from './inline-vtt';
 import { filterPlausibleSubtopics, sectionOfChapter } from './subtopics';
 import sanitize = require('sanitize-filename');
 
+/** Subcarpeta del curso con los archivos de depuración (--debug-network, --debug-screenshot). */
+export const DEBUG_DIR = 'debug';
+
 type Subtopic = { sub: string; title: string };
 
 /** Cuestionarios / "Prueba de mi conocimiento" — no van al índice. */
@@ -138,7 +141,7 @@ async function serializeChapterData(page: Page, tabMinMs = 150): Promise<Chapter
           since = Date.now();
         }
         if (!runningFinite() && Date.now() - since >= quiet) break;
-        await sleep(50);
+        await sleep(100);
       }
     };
 
@@ -1045,8 +1048,8 @@ export type SaveChapterOptions = {
   videos?: boolean;
   /** Grabar las animaciones interactivas (canvas + play + deslizador) para verlas sin conexión (por defecto sí). */
   animations?: boolean;
-  /** Guarda `debug-red-<capítulo>.json` (peticiones de red sin cookies/tokens y componentes detectados) para diagnosticar. */
-  dumpNetwork?: boolean;
+  /** Guarda `debug/red-<capítulo>.json` (peticiones de red sin cookies/tokens y componentes detectados) para diagnosticar. */
+  debugNetwork?: boolean;
   /** Tiempo máximo de grabación por animación (ms). */
   animationMaxMs?: number;
   /** La página ya se desplazó y estabilizó en prepareChapter: no repetir el scroll completo. */
@@ -1093,7 +1096,7 @@ export async function saveChapterHtml(
   let videoCapture: VideoCaptureResult = { ...EMPTY_CAPTURE, notes: [] };
   const wantAnimations = saveOpts.animations !== false;
   let animCapture: AnimationCaptureResult = { ...EMPTY_ANIMATIONS, notes: [], components: [], network: [] };
-  // peticiones de red de toda la captura del capítulo (solo con --dump-network)
+  // peticiones de red de toda la captura del capítulo (solo con --debug-network)
   const netLog: Array<Record<string, unknown>> = [];
   const onNetResponse = (res: import('puppeteer').HTTPResponse) => {
     if (netLog.length >= 1500) return;
@@ -1103,7 +1106,7 @@ export async function saveChapterHtml(
       // sin cabeceras
     }
   };
-  if (saveOpts.dumpNetwork) {
+  if (saveOpts.debugNetwork) {
     // si una captura anterior de esta pestaña terminó con error, no deja su escucha puesta
     const prevL = NET_LISTENERS.get(page);
     if (prevL) page.off('response', prevL);
@@ -1111,11 +1114,11 @@ export async function saveChapterHtml(
     page.on('response', onNetResponse);
   }
   const writeNetDump = async (outcome: string) => {
-    if (!saveOpts.dumpNetwork) return;
+    if (!saveOpts.debugNetwork) return;
     page.off('response', onNetResponse);
     try {
-      await mkdir(siteDir, { recursive: true });
-      const name = `debug-red-${(chapterId ?? 'capitulo').replace(/[^0-9A-Za-z._-]/g, '_')}.json`;
+      await mkdir(join(siteDir, DEBUG_DIR), { recursive: true });
+      const name = join(DEBUG_DIR, `red-${(chapterId ?? 'capitulo').replace(/[^0-9A-Za-z._-]/g, '_')}.json`);
       const dump = {
         nota: 'Sin cookies, cabeceras ni tokens: las URLs llevan solo los nombres de la query. Envíalo tal cual si la animación sigue sin funcionar.',
         capitulo: chapterId ?? null,
@@ -1145,8 +1148,10 @@ export async function saveChapterHtml(
   for (let pass = 0; pass < 2; pass++) {
     const patient = pass > 0 || !!saveOpts.patient;
     if (pass > 0 || !saveOpts.prescrolled) await scrollLaunchContent(page);
+    // 1ª pasada tras prepareChapter (ya esperó red, DOM estable y --min-wait): basta un silencio corto
+    const justPrepared = pass === 0 && !patient && !!saveOpts.prescrolled;
     await waitForContentStable(page, {
-      quietMs: patient ? pol.stableMs * 2 : pol.stableMs,
+      quietMs: patient ? pol.stableMs * 2 : justPrepared ? Math.min(150, pol.stableMs) : pol.stableMs,
       maxMs: patient ? pol.maxStableMs * 2 : Math.min(pol.maxStableMs, 4000),
       minMs: patient ? pol.minWaitMs : 0,
     });

@@ -670,7 +670,7 @@ function validateCourse(courseDir, opt) {
     if (pendingAnims)
       chap.warnings.push(
         pendingAnims + ' animación(es) sin recursos locales (canvas vacío offline: el reproductor y sus datos no se guardan' +
-          (a.anim.attempted ? '; ya se intentó grabar, revise debug-red-<cap>.json con --dump-network' : '; vuelva a descargar este capítulo') + ').'
+          (a.anim.attempted ? '; ya se intentó grabar, revise debug/red-<cap>.json con --debug-network' : '; vuelva a descargar este capítulo') + ').'
       );
     if (a.stylesOutdated)
       chap.warnings.push('guardado con el cargador de estilos antiguo: los componentes anidados (p. ej. gráficas dinámicas dentro de pestañas) pierden sus estilos y el texto sale fuera de sus cajas. Vuelva a descargar este capítulo (--only <cap> --force).');

@@ -29,8 +29,8 @@ export const TRACKER_PATTERNS = [
 ];
 
 /**
- * Vídeo/audio. SOLO con --block-media (opcional): ahorra RAM en el renderer, pero entonces los reproductores
- * no pueden cargar su fuente y los vídeos no se pueden capturar. Por defecto NO se bloquean: el reproductor
+ * Vídeo/audio. Solo con --no-videos: ahorra RAM en el renderer (los reproductores
+ * no pueden cargar su fuente, pero con --no-videos no se capturan). Por defecto NO se bloquean: el reproductor
  * de Netacad se activa (play) para leer la URL real del vídeo, que luego se descarga aparte con Node.
  * No incluye los manifiestos (.m3u8/.mpd): sin ellos el reproductor HLS ni siquiera se monta.
  */

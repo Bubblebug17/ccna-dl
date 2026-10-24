@@ -239,9 +239,9 @@ test('--no-animations: no pulsa play; el capítulo queda pendiente y una ejecuci
   assert.equal(chapterUpToDate(v, true, true), false, 'con animaciones: se repite');
 });
 
-test('--dump-network: debug-red-<capítulo>.json con componentes y peticiones, sin tokens ni cookies', async () => {
-  const { siteDir } = await save('dump', 'clean=1&anim=ok', { dumpNetwork: true });
-  const f = path.join(siteDir, 'debug-red-2.3.json');
+test('--debug-network: debug/red-<capítulo>.json con componentes y peticiones, sin tokens ni cookies', async () => {
+  const { siteDir } = await save('dump', 'clean=1&anim=ok', { debugNetwork: true });
+  const f = path.join(siteDir, 'debug', 'red-2.3.json');
   assert.ok(fs.existsSync(f), 'existe el volcado');
   const raw = fs.readFileSync(f, 'utf8');
   const j = JSON.parse(raw);

@@ -26,7 +26,7 @@
 `ccna-dl` abre Netacad con un navegador automatizado (Puppeteer + Chrome), inicia sesión con **tu propia cuenta**, recorre el índice (outline) de un curso y guarda **cada capítulo como un archivo HTML autónomo** junto con sus recursos (CSS, fuentes, imágenes, archivos). El resultado se puede abrir sin internet.
 
 - **Uso previsto:** personal y educativo, con tu propia cuenta de Netacad y para cursos en los que estás matriculado. No lo uses para redistribuir material (ver el *Disclaimer* del [README](README.md)).
-- Los cursos nuevos de Netacad ("launch") se guardan como **HTML offline**. Si la URL no es de tipo launch, el programa usa el modo antiguo: **PDF** por capítulo, unidos en un único PDF.
+- Los cursos nuevos de Netacad ("launch") se guardan como **HTML offline**. Solo se admiten enlaces de tipo launch: el modo PDF de la interfaz clásica se quitó (esa interfaz ya no existe).
 - Lo que **no** garantiza: los vídeos (ver [§12](#12-limitaciones-conocidas-y-riesgos)).
 
 ## 2. Requisitos e instalación
@@ -109,12 +109,11 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `<urls…>` | — | URL(s) de los cursos (obligatoria al menos una, salvo con `--validate`). |
 | `--user`, `-u` | — | Correo/usuario de Netacad (obligatorio salvo con `--validate`). |
 | `--password`, `-p` | `.env` → pregunta | Contraseña. |
-| `--concurrency`, `-c N` | HTML: **2** automático (baja a 1 con poca RAM libre; máx. **6**); PDF: 10 | Capítulos descargados a la vez (pestañas del navegador en paralelo). Cada pestaña puede usar ~1 GB; con un valor explícito se respeta pero se avisa si no cabe en la RAM libre. |
+| `--concurrency`, `-c N` | **2** automático (baja a 1 con poca RAM libre; máx. **6**) | Capítulos descargados a la vez (pestañas del navegador en paralelo). Cada pestaña puede usar ~1 GB; con un valor explícito se respeta pero se avisa si no cabe en la RAM libre. |
 | `--recycle-every N` | **8** (`0` = nunca) | Cada `N` capítulos se vacía y se cierra/reabre la pestaña de cada worker para liberar la memoria del renderer de Chrome. También se recicla antes si el heap de JS de la pestaña supera ~600 MB o la RAM libre baja de ~700 MB. La pestaña de la sesión no se cierra: se cambia de proceso (`chrome://version` → `about:blank`). |
-| `--block-media` | desactivado | Opcional: el navegador no carga vídeo/audio (`.mp4`, `.webm`, `.mp3`, `.m4a`, `.ogv`) para ahorrar memoria. **Por defecto se cargan**, porque el reproductor debe arrancar para poder capturar y descargar el vídeo (§7.5). Combinarlo con vídeos activos puede dejarlos sin descargar. |
 | `--no-videos` | desactivado | No activa los reproductores ni descarga vídeos (se queda el póster, como antes de la v. 3 del formato). Esos capítulos se guardan con formato 2 y la reanudación no los rehace por vídeos pendientes. |
 | `--no-animations` | desactivado | No pulsa «play» en las animaciones interactivas (`<adobe-animate-view>`) ni las graba (§7.6). Sin esta opción cada animación se graba como `.webm` local (hasta 90 s por animación). |
-| `--dump-network` | desactivado | Diagnóstico (§7.6): escribe `<curso>/debug-red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red de la activación, **sin cookies, cabeceras ni valores de query** (solo nombres de parámetros; los tramos de ruta que parecen tokens salen como `<token>`). |
+| `--debug-network` | desactivado | Depuración (§7.6): escribe `<curso>/debug/red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red de la activación, **sin cookies, cabeceras ni valores de query** (solo nombres de parámetros; los tramos de ruta que parecen tokens salen como `<token>`). |
 | `--out-dir`, `-o` | `.` (carpeta actual) | Carpeta donde se crea la carpeta del curso. |
 | `--only <expr>` | — | Descarga solo una parte del curso **sin sincronizar el curso entero** (§5.5). Acepta un capítulo (`--only 2.3`), un módulo entero (`--only 2`, incluye 2.0, 2.1…), una lista (`--only 2.1,2.3,5`) y rangos (`--only 2.1-2.4`, `--only 2-4`). |
 | `--refresh-outline` | desactivado | Con `--only`: ignora `outline-cache.json` y vuelve a leer el outline (§5.5). |
@@ -122,16 +121,24 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--retry-failed` | desactivado | Descarga solo los capítulos de `descarga-fallos.json`. |
 | `--min-wait ms` | **1500** (500 con `--fast`) | Tiempo mínimo que el contenido debe llevar cargado antes de guardar, *además* de las esperas por condición. |
 | `--chapter-timeout s` | **300** | Segundos máximos por intento de capítulo; al agotarse se reinicia esa pestaña y se reintenta. |
-| `--fast` | desactivado | Modo rápido (opt-in, menos seguro): esperas más cortas y bloquea también `adobedtm` (el vídeo/audio solo se bloquea con `--block-media`). |
+| `--fast` | desactivado | Modo rápido (opt-in, menos seguro): esperas más cortas y bloquea también `adobedtm` (el vídeo/audio también se bloquea con `--no-videos`). |
 | `--no-block-trackers` | bloqueo activo | No bloquear analítica/publicidad/seguimiento. |
 | `--asset-concurrency N` | **6** | Descargas simultáneas de recursos por capítulo. |
 | `--retries N` | **3** | Reintentos con espera creciente (recursos y capítulos fallidos; los reintentos de capítulo se limitan a 2 extra). |
-| `--screenshot` | desactivado | Guarda `course.png` (captura de depuración de la vista del curso). |
-| `--headful` | desactivado | Abre Chrome con ventana visible (headless por defecto). |
+| `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png` (vista del curso tras el login). |
+| `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). |
 | `--validate` | desactivado | Valida **offline** las descargas de `--out-dir` y escribe `validation-report.md`. No descarga ni inicia sesión. |
-| `--format <fmt>` | `a4` | Solo modo PDF: formato de página de Puppeteer. |
-| `--timeout`, `-t` | — | Solo modo PDF: tiempo máximo; al superarse se corta la descarga (se pasa a Puppeteer al generar el PDF). |
 | `--help`, `-h` | — | Ayuda. |
+
+**Opciones renombradas o quitadas** (si se usan, el programa termina con un error que indica la nueva):
+
+| Antes | Ahora |
+|---|---|
+| `--dump-network` | `--debug-network` (salida en `<curso>/debug/red-<cap>.json`) |
+| `--screenshot` | `--debug-screenshot` (salida en `<curso>/debug/course.png`) |
+| `--headful` | `--debug-headful` |
+| `--block-media` | quitada: `--no-videos` ya bloquea vídeo/audio |
+| `--format`, `--timeout`/`-t` | quitadas (modo PDF de la interfaz clásica, que ya no existe; usa `--chapter-timeout`) |
 
 ### 5.2 Ejemplos
 
@@ -181,7 +188,7 @@ node lib/cli.js -u tu@correo.com --fast --concurrency 3 $URL                  # 
 **Ver el navegador / depurar:**
 
 ```powershell
-node lib/cli.js -u tu@correo.com --headful --screenshot --only 1.0 -o C:\Users\alexs\ccna-test-1.0 $URL
+node lib/cli.js -u tu@correo.com --debug-headful --debug-screenshot --only 1.0 -o C:\Users\alexs\ccna-test-1.0 $URL
 ```
 
 **Otras opciones:**
@@ -189,12 +196,6 @@ node lib/cli.js -u tu@correo.com --headful --screenshot --only 1.0 -o C:\Users\a
 ```powershell
 node lib/cli.js -u tu@correo.com --no-block-trackers $URL                     # no bloquear analítica
 node lib/cli.js -u tu@correo.com --asset-concurrency 4 --retries 5 $URL       # recursos más suaves / más reintentos
-```
-
-**Modo PDF (solo si la URL no es del tipo launch):** genera un PDF por capítulo y los une en `<id>_<título>.pdf` dentro de `--out-dir`. Usa `--format` (p. ej. `a4`), `--timeout` y `--concurrency` (por defecto 10 en este modo).
-
-```powershell
-node lib/cli.js -u tu@correo.com --format a4 --concurrency 5 "<url-de-curso-antiguo>"
 ```
 
 ### 5.5 `--only`: descargar solo parte del curso
@@ -268,9 +269,8 @@ flowchart TD
     B --> C[Login en Netacad con --user y contraseña]
     C --> D[Abrir el enlace launch del curso]
     D --> E[Leer outline y listar URLs de capítulos]
-    E --> F{¿URL tipo launch?}
-    F -- No --> P[Modo PDF antiguo: un PDF por capítulo y unión]
-    F -- Sí --> G[Cola de capítulos]
+    E --> F[Solo URLs launch]
+    F --> G[Cola de capítulos]
     G --> V[Resume: verificar en paralelo los ya guardados]
     V --> H[Pool de N pestañas en paralelo --concurrency]
     H --> I[Navegar al capítulo y cerrar banner de cookies]
@@ -297,7 +297,7 @@ flowchart TD
 
 - **Verificación posterior y re-captura.** Tras guardar se comprueba el HTML (tamaño, texto, loaders, referencias locales). Si detecta una carga sin terminar, se re-captura **una vez en el sitio con más paciencia**; si no basta, se **recarga la página y se captura otra vez**; si aun así falla, el capítulo queda `parcial` (con la marca `ccna-dl-incomplete`) y se rehace al reanudar.
 - **Caché de assets compartida.** Un mismo recurso (CSS, fuente, imagen) se descarga **una sola vez** aunque lo pidan varios capítulos o pestañas a la vez; hay además un límite global de descargas simultáneas y una caché de cookies de 30 s.
-- **Bloqueo de trackers y medios.** Por defecto se bloquean analítica/publicidad/seguimiento a nivel de red (el vídeo/audio solo con `--block-media`) (CDP `Network.setBlockedURLs`). No se bloquea CSS, fuentes, imágenes ni scripts del propio sitio. `--no-block-trackers` desactiva el bloqueo de trackers y `--block-media` (opcional, desactivado por defecto) activa el de vídeo/audio; `--fast` bloquea además `adobedtm`. Los archivos de vídeo/audio los descarga Node (directo o con ffmpeg); el navegador solo los carga para reproducir y capturar la fuente.
+- **Bloqueo de trackers y medios.** Por defecto se bloquean analítica/publicidad/seguimiento a nivel de red (el vídeo/audio solo con `--no-videos`) (CDP `Network.setBlockedURLs`). No se bloquea CSS, fuentes, imágenes ni scripts del propio sitio. `--no-block-trackers` desactiva el bloqueo de trackers y `--no-videos` activa el de vídeo/audio; `--fast` bloquea además `adobedtm`. Los archivos de vídeo/audio los descarga Node (directo o con ffmpeg); el navegador solo los carga para reproducir y capturar la fuente.
 - **Memoria (Chrome).** (1) Reciclado de pestañas cada `--recycle-every` capítulos (o antes por heap de JS/poca RAM; se mide con `page.metrics()`): se pasa por `about:blank`, se cierra y se abre una pestaña nueva. (2) Sin vídeo/audio en el navegador. (3) Flags de Chrome (`src/browser-args.ts`): sin BackForwardCache (guardaba páginas anteriores en RAM), caché de disco/medios mínima (los recursos los baja Node; la caché de Chrome solo ocupaba disco en `%TEMP%`), sin extensiones/sync/redes de fondo, `--disable-dev-shm-usage`, `--disable-gpu` (solo headless), `--mute-audio` y tope de heap de JS `--max-old-space-size=1536`. No se usa `--renderer-process-limit` (compartir procesos entre pestañas empeora el aislamiento y las fugas). (4) Pestañas por defecto: 2, o menos si `RAM libre − 1,5 GB` no da para ~1,2 GB por pestaña; con `--concurrency` explícito se avisa si no cabe. (5) Los recursos nunca pasan por la memoria de Node: se escriben a disco en streaming (`.part` → rename), se omiten los que ya existen y los comunes se descargan una sola vez.
 - **Pestañas en segundo plano.** Se emula foco por CDP y se lanzan los flags de Chrome `--disable-background-timer-throttling`, `--disable-backgrounding-occluded-windows` y `--disable-renderer-backgrounding`; si no, las pestañas ocultas pueden bloquearse (`requestAnimationFrame`).
 - **Robustez.** Timeout por capítulo, reinicio de la pestaña si se cuelga/cae, reintentos con espera creciente, y una pestaña extra que recibe "Sesión no válida" antes de terminar ningún capítulo se retira (su capítulo se reencola en la pestaña principal).
@@ -308,7 +308,7 @@ flowchart TD
 
 | Archivo | Qué hace |
 |---|---|
-| `cli.ts` | Punto de entrada (cmd-ts): opciones, login, descubrimiento, elección HTML/PDF, Ctrl+C, bloqueo de recursos, `--validate`. |
+| `cli.ts` | Punto de entrada (cmd-ts): opciones, login, descubrimiento, opciones quitadas/renombradas (`removed-flags.ts`), Ctrl+C, bloqueo de recursos, `--validate`. |
 | `login.ts` | Inicio de sesión: escribe el usuario, avanza, introduce la contraseña y gestiona el banner de cookies y la página de privacidad de Cisco. |
 | `get-chapters.ts` | Lee el outline del curso y devuelve las URLs de capítulo (con `--only`, escaneo reducido a los módulos pedidos). |
 | `only-spec.ts` | Parser de la expresión `--only` (capítulo, módulo, lista, rango) y su filtro. |
@@ -320,7 +320,7 @@ flowchart TD
 | `content-probe.ts` | Sondeo del contenido: loaders, vacíos, imágenes pendientes, estabilidad del DOM. |
 | `wait-for-spinners.ts` | Espera a que desaparezcan los `.loading-spinner` (máx. 10 s). |
 | `download-assets.ts` | Descarga de recursos con reintentos, deduplicación, semáforo global y caché de cookies. |
-| `block-resources.ts` | Patrones de bloqueo de trackers, de medios (vídeo/audio, solo con `--block-media`) y modo agresivo (`--fast`). |
+| `block-resources.ts` | Patrones de bloqueo de trackers, de medios (vídeo/audio, solo con `--no-videos`) y modo agresivo (`--fast`). |
 | `subtopics.ts` | Valida los subtemas `X.Y.Z` detectados (descarta IP/redes como `.0/16`, números que no son de la sección, títulos sin letras). |
 | `chapter-ids.ts` | Colisiones de ids de archivo: `dropShadowedSubchapters` (el cuestionario `2.2.1` no pisa la sección `2.2`) y `dedupeByFileId`. |
 | `capture-animations.ts` | Animaciones interactivas (`<adobe-animate-view>`): detecta el canvas con play + deslizador, pulsa play, graba el canvas (`MediaRecorder` → `.webm`) y la línea de tiempo de los textos HTML superpuestos; guarda `sanitizeUrl` y la lista de peticiones para `--dump-network`. |
@@ -333,11 +333,9 @@ flowchart TD
 | `run-summary.ts` | Lectura/escritura de `descarga-resumen.json` y `descarga-fallos.json`. |
 | `progress.ts` | Barra de progreso (cli-progress) con líneas por capítulo. |
 | `url-to-chapter-id.ts` | Obtiene el número de capítulo de una URL (parámetro `_chapter` o patrón `N.N`). |
-| `expand-carousels.ts`, `solve-quizzes.ts`, `click-in-bg.ts` | Solo **modo PDF** antiguo: expandir carruseles, resolver cuestionarios y hacer clic en segundo plano. |
 | `config/env.ts` | Carga de `.env` (`dotenv`) y tipado de `PASSWORD` / `NODE_ENV`. |
 | `util/retry.ts` | `withRetry`, `backoffMs`, `mapPool`, `waitUntil`, `fmtDuration`. |
 | `util/promise.ts` | `delay`, `promisePool`, utilidades de promesas. |
-| `util/object.ts` | `hasOwnProperty` (para validar el formato de página en PDF). |
 
 También: `scripts/validate-download.js` (validador offline), `scripts/clean-fake-chapters.js` (limpieza de capítulos/subtemas falsos de descargas antiguas) y `test/` (pruebas, servidor fixture, benchmark).
 
@@ -370,7 +368,7 @@ Es una **grabación** de la animación tal como se reprodujo una vez (no es inte
 
 **Reanudación.** El capítulo guarda `<meta name="ccna-dl-anim">` cuando se intentó grabar. Un capítulo con animaciones sin grabar y **sin** esa marca (descargas anteriores a esta función, como el 2.3 antiguo) se rehace aunque no uses `--force`; con la marca no se repite en bucle (usa `--force`). El formato del capítulo (`ccna-dl-format`) no cambia.
 
-**Diagnóstico.** `--dump-network` escribe `debug-red-<capítulo>.json` (`nota`, `capitulo`, `resultado`, `animaciones` con cada componente y su resultado, `videos`, `peticiones` con URL saneada, estado, método, tipo de recurso y content-type). No incluye cookies, cabeceras ni valores de query. Envíalo si una animación sigue sin funcionar.
+**Diagnóstico.** `--debug-network` escribe `debug/red-<capítulo>.json` (`nota`, `capitulo`, `resultado`, `animaciones` con cada componente y su resultado, `videos`, `peticiones` con URL saneada, estado, método, tipo de recurso y content-type). No incluye cookies, cabeceras ni valores de query. Envíalo si una animación sigue sin funcionar.
 
 **Capítulos/subtemas inexistentes (causa y arreglo).** En los cursos «launch» cada `X.Y` es *una* página y los `X.Y.Z` son encabezados (`data-sub`). Se encontraron dos fallos:
 
@@ -397,7 +395,7 @@ npm run build
 
 **Validador.** Avisos «cargador de estilos antiguo (re-descargar)» y «caja vacía en animación/pestaña» (`.dynamic-text-item` sin texto).
 
-**Regenerar** (capítulos ya descargados con el cargador antiguo): `npm run build` y lanzar el mismo comando con `--only 1.3 --force --concurrency 1` (y `--dump-network` si hace falta diagnóstico).
+**Regenerar** (capítulos ya descargados con el cargador antiguo): `npm run build` y lanzar el mismo comando con `--only 1.3 --force --concurrency 1` (y `--debug-network` si hace falta diagnóstico).
 
 ## 8. Validación
 
@@ -446,16 +444,16 @@ npm test
 | `test/unit.test.js` | Utilidades (backoff, reintentos, `mapPool`, `waitUntil`, `fmtDuration`), `lowercasePathVariant`, `verifyChapterHtml`, y que el validador no tome `url(%23id)` dentro de `data:` como referencia rota. |
 | `test/subtopics.test.js` | Subtemas falsos (IP/redes), `dropShadowedSubchapters`/`dedupeByFileId`, filtro al leer capítulos y al construir el índice, `bogusSubtopic` del validador y `scripts/clean-fake-chapters.js` (simulación no modifica; `--apply` respalda, limpia y aparta). |
 | `test/video.test.js` | Vídeos con el servidor fixture + puppeteer (necesita ffmpeg para generar el vídeo): reproductor diferido con URL firmada mp4 y HLS (vía ffmpeg), reescritura a rutas locales, `.vtt` incrustado, apertura por `file://` (`readyState`, `duration`, pistas, sin peticiones externas), `video=none` → aviso y pendiente, `--no-videos`, formato 3 y reanudación. |
-| `test/animation.test.js` | Animaciones: el fixture `anim=ok` imita `<adobe-animate-view>` (canvas vacío hasta pulsar play, textos animados por JS, `<play-pause>`/`<aa-scrubber>` con Shadow DOM). Comprueba la grabación `.webm`, el HTML con `file://` (panel con contenido, deslizador que avanza, arrastrar el deslizador mueve el vídeo, textos según la línea de tiempo, sin peticiones externas), `anim=dead` → aviso y pendiente sin bucle, `--no-animations`, `--dump-network` sin tokens ni cookies, `sanitizeUrl`, `countPendingAnimations` y el aviso «animación sin recursos locales» del validador. |
+| `test/animation.test.js` | Animaciones: el fixture `anim=ok` imita `<adobe-animate-view>` (canvas vacío hasta pulsar play, textos animados por JS, `<play-pause>`/`<aa-scrubber>` con Shadow DOM). Comprueba la grabación `.webm`, el HTML con `file://` (panel con contenido, deslizador que avanza, arrastrar el deslizador mueve el vídeo, textos según la línea de tiempo, sin peticiones externas), `anim=dead` → aviso y pendiente sin bucle, `--no-animations`, `--debug-network` sin tokens ni cookies, `sanitizeUrl`, `countPendingAnimations` y el aviso «animación sin recursos locales» del validador. |
 | `test/graphic.test.js` | Gráficos dinámicos y pestañas anidadas (fixture `graphic`): cada pestaña muestra su panel, las cajas tienen su texto final (relleno con retraso por JS y animación CSS), sin recorte y con el bbox del texto dentro del de su caja, con `file://` a 1400/1000/640 px; sensibilidad (sin hojas anidadas el control falla); marca `ccna-dl-styles` y detección/reanudación de capítulos con el cargador antiguo. |
 | `test/save.test.js` | Guardado de un capítulo (assets, reintentos, pestañas), HTML funcional sin red, resumen/fallos, reanudación y `--retry-failed`. |
 | `test/only.test.js` | `--only`: parser (capítulo, módulo, lista, rango, errores), caché del outline (cuándo contesta, mezcla, caducidad, archivo corrupto), mezcla del resumen y ejecución parcial sobre el fixture (no se pierden otros capítulos ni en `index.html` ni en `descarga-resumen.json`). |
-| `test/parallel.test.js` | Política de esperas, concurrencia (mismos archivos y mismo orden con 1 y 3 pestañas), caché de assets compartida, esqueleto de 2 s que se espera, re-captura y estado `parcial`, reanudación con paralelismo, timeout y pestaña caída, Ctrl+C, bloqueo de trackers por CDP; **memoria**: reciclado de pestañas (por contador, por heap, por poca RAM, y de la pestaña de sesión) con el mismo resultado que sin reciclar, con `--block-media` los medios se bloquean en el navegador pero los descarga Node, y `planTabs`. |
+| `test/parallel.test.js` | Política de esperas, concurrencia (mismos archivos y mismo orden con 1 y 3 pestañas), caché de assets compartida, esqueleto de 2 s que se espera, re-captura y estado `parcial`, reanudación con paralelismo, timeout y pestaña caída, Ctrl+C, bloqueo de trackers por CDP; **memoria**: reciclado de pestañas (por contador, por heap, por poca RAM, y de la pestaña de sesión) con el mismo resultado que sin reciclar, con `--no-videos` los medios se bloquean en el navegador pero los descarga Node, y `planTabs`. |
 | `test/bench-mem.js`, `test/memwatch.js` | Benchmark de **memoria** (suma del RSS de Chrome y sus hijos; solo procesos propios, Linux). No es un test. |
 | `test/bench.js` | Benchmark local (no es un test). |
 | `test/fixture-server.js` | Servidor local con latencia simulada y efecto de carga. |
 
-Estado actual: **68 pruebas** (11 en `unit`, 10 en `subtopics`, 3 en `save`, 5 en `only`, 10 en `video`, 7 en `animation`, 6 en `graphic`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
+Estado actual: **69 pruebas** (12 en `unit`, 10 en `subtopics`, 3 en `save`, 5 en `only`, 10 en `video`, 7 en `animation`, 6 en `graphic`, 16 en `parallel`). Pasaron en la caja de pruebas (Linux, con Chrome y ffmpeg).
 
 Benchmark de memoria: `node test/bench-mem.js --chapters 30 --scenarios antes:3,ahora:2` (ver [§10.4](#104-memoria-de-chrome-fixture)).
 
@@ -503,7 +501,7 @@ Ningún modo guardó capítulos con el esqueleto de carga a medias. La ganancia 
 - Si las pestañas extra comparten bien la sesión de Netacad (no comparten `sessionStorage`; hay una salvaguarda, pero no se ha visto en vivo).
 - Que los heurísticos de spinner/esqueleto/contenedor vacío coincidan con las clases reales de Netacad (son suposiciones).
 - El bloqueo de trackers contra Netacad real, y el modo `--fast` en vivo.
-- Comportamiento con ventana visible (`--headful`) en Windows; el efecto de pestañas en segundo plano se comprobó solo en Chrome headless.
+- Comportamiento con ventana visible (`--debug-headful`) en Windows; el efecto de pestañas en segundo plano se comprobó solo en Chrome headless.
 - Tiempos reales: el benchmark es un servidor local, no Netacad.
 - Capítulos con pestañas/carruseles reales: el 1.0 no tiene.
 - **Gráficos dinámicos (1.3.3/1.3.4):** el arreglo se comprobó sobre una copia parcheada del 1.3 ya descargado (textos dentro de las cajas a 1400/1000/700 px) y con el fixture; no se ha regenerado con Netacad real. El paso a paso original (JS de Netacad) no se reproduce: offline queda el estado final.
@@ -525,7 +523,7 @@ Lecciones y límites: (a) el fixture **no reproduce** los renderers de 3 GB de N
 
 | Síntoma | Qué hacer |
 |---|---|
-| **"Sesión no válida"** | La sesión caducó o una pestaña extra no la comparte. Baja a `--concurrency 1` o `2` y vuelve a lanzar el mismo comando (reanuda). Si persiste, prueba `--headful`. |
+| **"Sesión no válida"** | La sesión caducó o una pestaña extra no la comparte. Baja a `--concurrency 1` o `2` y vuelve a lanzar el mismo comando (reanuda). Si persiste, prueba `--debug-headful`. |
 | **Capítulos `parcial`** | La carga no terminó ni tras re-capturar. Sube la espera (`--min-wait 2500`, `--chapter-timeout 420`) y relanza: se rehacen. También `--retry-failed`. |
 | **Capturó un spinner / contenido vacío** | Usa el modo seguro (no `--fast`), sube `--min-wait` y rehace ese capítulo: `--only <cap> --force`. El validador lo avisa como "loader/spinner sin ocultar" o "texto sospechoso". |
 | **403/404 de recursos del curso** | Son referencias rotas del propio curso (fuentes `ciscoSansTT`, imágenes de fondo…). Salen como avisos (`guardado con avisos`), no se reintentan y no son un fallo del programa. |
@@ -538,16 +536,16 @@ Lecciones y límites: (a) el fixture **no reproduce** los renderers de 3 GB de N
 | **`Falta --user`** | Añade `--user tu@correo.com`. |
 | **Pide la contraseña por consola** | No hay `PASSWORD` en `.env` ni `--password`; escríbela (no se muestra) o créala en `.env`. |
 | **Chrome no se encuentra** | Ejecuta `npm install` de nuevo (descarga el Chrome de Puppeteer) o define `PUPPETEER_EXECUTABLE_PATH`. Para las pruebas, `CHROME_PATH`. |
-| `course.png` / `debug-*.png` sueltos | Son capturas de depuración (`--screenshot` genera `course.png`). No se versionan; puedes borrarlas. |
+| `course.png` / `debug-*.png` sueltos, carpeta `<curso>/debug/` | Archivos de depuración (`--debug-screenshot`, `--debug-network`; las versiones antiguas los dejaban sueltos). No se versionan; puedes borrarlos. |
 | **Caracteres raros en consola** | Problema de codificación de PowerShell; en el disco los nombres están bien. `[Console]::OutputEncoding=[Text.Encoding]::UTF8` ayuda. |
 | **Avisos de git `LF will be replaced by CRLF`** | Inofensivos en Windows. |
 
-Pasos generales de diagnóstico: (1) `--only <cap> --headful` para ver qué pasa; (2) revisar `descarga-resumen.json` (campo `reason` por capítulo) y `descarga-fallos.json`; (3) ejecutar el validador.
+Pasos generales de diagnóstico: (1) `--only <cap> --debug-headful` para ver qué pasa; (2) revisar `descarga-resumen.json` (campo `reason` por capítulo) y `descarga-fallos.json`; (3) ejecutar el validador.
 
 ## 12. Limitaciones conocidas y riesgos
 
 - **Rate-limit / detección.** Netacad podría limitar o bloquear muchas pestañas o peticiones simultáneas. Empieza con `--concurrency 2` (por defecto); sube con cuidado (máx. 6) y solo si tienes RAM de sobra (~1,2 GB por pestaña).
-- **Vídeos.** Se capturan activando el reproductor (§7.5), pero **no están verificados con Netacad real** (solo con un fixture). Si la fuente es mp4 directo se descarga con `fetch`; si es HLS/DASH hace falta **ffmpeg** (`FFMPEG_PATH`). Pulsar «play» puede contar como visto; los vídeos en pestañas no activas, la transcripción interactiva y otros componentes que dependan de servicios externos no se guardan. Con `--block-media` los vídeos no se descargan.
+- **Vídeos.** Se capturan activando el reproductor (§7.5), pero **no están verificados con Netacad real** (solo con un fixture). Si la fuente es mp4 directo se descarga con `fetch`; si es HLS/DASH hace falta **ffmpeg** (`FFMPEG_PATH`). Pulsar «play» puede contar como visto; los vídeos en pestañas no activas, la transcripción interactiva y otros componentes que dependan de servicios externos no se guardan.
 - **Animaciones.** Se graban en tiempo real (hasta 90 s cada una) y dependen de `MediaRecorder` y de que el canvas no esté «tainted» (imágenes de otro origen sin CORS); no está verificado con Netacad real (§7.6). Las animaciones en iframes anidados de «contenido interactivo» no se capturan.
 - **Selectores de login y de la interfaz.** Dependen del HTML actual de Netacad (por ejemplo `#netacad-login-button`, `input[name="username"]`, `input[name="login"]`, clases del outline). Si Netacad cambia su web, pueden romperse y habrá que adaptar `login.ts` / `get-chapters.ts`. El propio README original avisa de que la herramienta puede quedar desfasada.
 - **Enlaces remotos (`.pka`, `.pdf`, descargas de laboratorio).** Los enlaces a archivos externos (Packet Tracer `.pka`/`.pkt`, PDFs enlazados, `netacad.com/resources/lab-downloads`…) se conservan como **enlaces normales**: sin internet no abren. Solo se guardan los recursos que el capítulo carga directamente.
@@ -591,6 +589,7 @@ Avisos comunes a todos (esperables): favicon no guardado, fuentes `ciscoSansTT` 
 | `80c83fb` | perf(memoria): reciclado de pestañas (`--recycle-every`), medios bloqueados por defecto (`--no-block-media`; sustituido después por `--block-media` opcional), flags de Chrome de bajo consumo, pestañas por defecto 2 (automático según RAM libre) y aviso de memoria; el sondeo de carga ignora los spinners internos de `video.js`; pruebas y `test/bench-mem.js`. |
 | *(commit animaciones)* | feat: animaciones interactivas `<adobe-animate-view>` (2.3.2) reproducibles offline: se graba el canvas + línea de tiempo de textos (`capture-animations.ts`, §7.6), reproductor propio en el HTML, `--no-animations`, `--dump-network` (`debug-red-<cap>.json` sin cookies ni tokens), reanudación por `ccna-dl-anim`, aviso «animación sin recursos locales» en el verificador y en `validate-download.js`; pruebas `animation`. |
 | *(commit `--only`)* | feat: `--only` acepta capítulo, módulo, lista y rango con escaneo reducido a los módulos pedidos; `outline-cache.json` y `--refresh-outline`; el resumen y el índice se mezclan en ejecuciones parciales (antes `descarga-resumen.json` se sobrescribía solo con lo de la ejecución); pruebas `only`. |
+| *(commit purga)* | refactor: opciones de depuración con prefijo `--debug-` (`--dump-network`→`--debug-network`, `--screenshot`→`--debug-screenshot`, `--headful`→`--debug-headful`; los nombres viejos dan error con el nuevo) y salida en `<curso>/debug/`; quitado el modo PDF de la interfaz clásica (`--format`, `--timeout`/`-t`, `muhammara`, `expand-carousels`, `solve-quizzes`, `click-in-bg`, `util/object`, `promisePool`, `captureLaunchChapterPdf`, outline clásico) y `--block-media` (lo hace `--no-videos`); código muerto de `get-chapters`; perf: sin espera fija de 800 ms al navegar, sin `waitForSpinners` duplicado, silencio corto en la 1ª pasada tras preparar el capítulo (fixture 12 caps: c=1 49→46 s, c=2 24,5→22,9 s). |
 | *(commit gráficos)* | fix: cargador offline que no aplicaba las hojas adoptadas en componentes anidados (textos fuera de las cajas en 1.3.3/1.3.4), marca `ccna-dl-styles`, espera de fuentes/animaciones/pestañas, avisos del validador y `graphic.test.js`. |
 | *(commit anterior)* | fix: capítulos/subtemas inexistentes (IP tomadas por subtemas, cuestionario `X.Y.1` que pisaba la sección `X.Y`), filtros en detección/índice/validador, `scripts/clean-fake-chapters.js`; feat: vídeos reproducibles offline (activar el reproductor, mp4/HLS con ffmpeg, póster y `.vtt` incrustado, formato 3); el bloqueo de medios pasa a ser opcional (`--block-media`, se quita `--no-block-media`) y se añade `--no-videos`; pruebas `subtopics` y `video`. |
 

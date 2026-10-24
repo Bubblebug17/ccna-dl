@@ -105,3 +105,14 @@ test('validador: url(%23id) dentro de un data:image/svg+xml de CSS no es una ref
   const refs = cssRefs(css).filter((u) => !u.startsWith('data:'));
   assert.deepStrictEqual(refs, ['../x.png', 'f.woff2']);
 });
+
+test('opciones renombradas/quitadas: error claro con el nombre nuevo', () => {
+  const { removedFlagErrors } = require('../lib/removed-flags');
+  assert.deepStrictEqual(removedFlagErrors(['--only', '1.3', '--force']), []);
+  assert.match(removedFlagErrors(['--dump-network'])[0], /usa --debug-network/);
+  assert.match(removedFlagErrors(['--screenshot'])[0], /--debug-screenshot/);
+  assert.match(removedFlagErrors(['--headful'])[0], /--debug-headful/);
+  assert.match(removedFlagErrors(['--format=a4'])[0], /se quitó/);
+  assert.match(removedFlagErrors(['--block-media'])[0], /--no-videos/);
+  assert.deepStrictEqual(removedFlagErrors(['--', '--headful']), []);
+});

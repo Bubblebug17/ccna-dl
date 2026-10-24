@@ -31,7 +31,7 @@ export type AnimationCaptureResult = {
   /** Bytes de webm guardados. */
   bytes: number;
   notes: string[];
-  /** Descripción (sin contenido) de cada componente, para depuración (--dump-network). */
+  /** Descripción (sin contenido) de cada componente, para depuración (--debug-network). */
   components: Array<Record<string, unknown>>;
   /** Peticiones de red vistas durante la activación (URL sin tokens). */
   network: NetEntry[];

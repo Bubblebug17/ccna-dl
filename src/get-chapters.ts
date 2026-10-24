@@ -1,6 +1,5 @@
 import { HTTPResponse, Page } from 'puppeteer';
 import * as cliProgress from 'cli-progress';
-import { urlToChapter } from './url-to-chapter-id';
 import { dropShadowedSubchapters } from './chapter-ids';
 import { describeOnly, explicitChaptersOfOnly, matchesOnly, modulesOfOnly, OnlySpec, parseOnly } from './only-spec';
 import { waitForSpinners } from './wait-for-spinners';
@@ -75,14 +74,9 @@ export async function getChapterUrls(
     }
     return getLaunchChapterUrls(page, options);
   }
-  const legacy = await getLegacyChapterUrls(page);
-  if (!options?.only) return legacy;
-  // curso clásico: no hay escaneo que ahorrar, solo se filtra la lista (2.3 ≡ 2.3.1)
-  const spec = parseOnly(options.only);
-  return legacy.filter((u) => {
-    const c = urlToChapter(u);
-    return matchesOnly(spec, c) || matchesOnly(spec, c.replace(/\.1$/, ''));
-  });
+  throw new Error(
+    `No es un curso "launch" de Netacad (${page.url()}). Solo se admiten enlaces https://www.netacad.com/.../launch?id=…; la interfaz clásica (descarga a PDF) ya no existe.`
+  );
 }
 
 function isLaunchPage(url: string): boolean {
@@ -217,23 +211,6 @@ async function injectOutlineHelpers(page: Page): Promise<void> {
       },
     };
   });
-}
-
-async function getLegacyChapterUrls(page: Page): Promise<string[]> {
-  await page.waitForSelector('iframe#contentframe');
-  const contentPage = await page.$eval(
-    'iframe#contentframe',
-    (iframe) => iframe.src
-  );
-  await page.goto(contentPage, { waitUntil: 'networkidle2' });
-
-  await page.waitForSelector('a.navlink.chunklink');
-  await page.$eval('a.navlink.chunklink', (link) => link.click());
-  let urls = await page.$$eval('a.navlink.chunklink', (links) =>
-    links.map((link) => link.href)
-  );
-  urls = urls.filter((url) => /^[0-9]+\.[0-9]+\.1$/.test(urlToChapter(url)));
-  return urls;
 }
 
 async function getLaunchChapterUrls(
@@ -652,33 +629,6 @@ async function expandOutlineModules(
 
 const MAX_OUTLINE_SCROLL_STEPS = 55;
 
-const OUTLINE_ITEM_SELECTORS =
-  'button[class*="subModuleBtn"], [role="treeitem"], button, a[href*="view="], li';
-
-async function ensureCurriculumOutlineView(
-  page: Page,
-  startUrl: string
-): Promise<void> {
-  let ready = false;
-  try {
-    ready = await page.evaluate(() => {
-      const root =
-        document.querySelector('#course-outline') ??
-        document.querySelector('[class*="nodeList"]');
-      return !!root && /tab=curriculum/.test(location.href);
-    });
-  } catch {
-    ready = false;
-  }
-
-  if (ready) return;
-
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-  await waitForSpinners(page).catch(() => undefined);
-  await injectOutlineHelpers(page);
-  await delay(500);
-}
-
 /** Recorre el outline con scroll incremental y expande nodos en cada paso. */
 async function exploreOutlineSidebar(
   page: Page,
@@ -738,10 +688,6 @@ async function exploreOutlineSidebar(
   });
 }
 
-async function scrollOutlineSidebar(page: Page): Promise<void> {
-  await exploreOutlineSidebar(page);
-}
-
 async function expandModuleForChapter(page: Page, chapter: string): Promise<void> {
   const moduleNum = chapter.split('.')[0];
   await page.evaluate((mod) => {
@@ -795,20 +741,6 @@ async function extractViewsFromPageHtml(
   for (const { view, chapter } of pairs) {
     if (isWantedChapter(chapter)) found.set(view, chapter);
   }
-}
-
-async function resolveChapterViewViaOutline(
-  page: Page,
-  chapter: string,
-  _networkSink?: Map<string, string>
-): Promise<string | null> {
-  await injectOutlineHelpers(page).catch(() => undefined);
-  await expandModuleForChapter(page, chapter);
-  await ensureOutlineChapterVisible(page, chapter);
-
-  const fromReact = await collectViewsFromReactOutline(page);
-  const reactHit = fromReact.find((e) => e.chapter === chapter);
-  return reactHit?.viewId ?? null;
 }
 
 async function collectViewsForMissingChapters(
@@ -1310,186 +1242,6 @@ async function ensureOutlineChapterVisible(
     // outline no disponible; el clic siguiente puede fallar sin tumbar el escaneo
   }
   await delay(200);
-}
-
-async function collectViewsByClicking(
-  page: Page,
-  alreadyHave = new Set<string>(),
-  onChapter?: (index: number, total: number, chapter: string) => void
-): Promise<ChapterEntry[]> {
-  await injectOutlineHelpers(page);
-
-  let targets: { chapter: string; index: number }[] = [];
-  try {
-    targets = await page.evaluate(
-      (skip, itemSelectors) => {
-        const helpers = window.__ccnaOutline;
-        const sidebar = helpers?.findOutlineSidebar();
-        if (!sidebar || !helpers) return [] as { chapter: string; index: number }[];
-
-        const candidates: {
-          chapter: string;
-          area: number;
-          index: number;
-        }[] = [];
-
-        Array.from(sidebar.querySelectorAll(itemSelectors)).forEach(
-          (el, index) => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0 || rect.height > 80)
-              return;
-
-            const label =
-              (el as HTMLElement).innerText?.trim().split('\n')[0] ?? '';
-            const chapter = helpers.chapterFromLabel(label);
-            if (
-              !chapter ||
-              !helpers.isWantedChapter(chapter) ||
-              skip.includes(chapter)
-            )
-              return;
-
-            candidates.push({ chapter, area: rect.width * rect.height, index });
-          }
-        );
-
-        const best = new Map<
-          string,
-          { chapter: string; area: number; index: number }
-        >();
-        for (const c of candidates) {
-          const prev = best.get(c.chapter);
-          if (!prev || c.area < prev.area) best.set(c.chapter, c);
-        }
-
-        return [...best.values()]
-          .sort((a, b) => a.index - b.index)
-          .map(({ chapter, index }) => ({ chapter, index }));
-      },
-      [...alreadyHave],
-      OUTLINE_ITEM_SELECTORS
-    );
-  } catch (e) {
-    console.warn(`    · no se pudo listar capítulos para clic: ${String(e)}`);
-    return [];
-  }
-
-  if (targets.length === 0) return [];
-
-  const collected = new Map<string, string>();
-  const usedViews = new Set<string>();
-  const startUrl = page.url();
-  const deadline = Date.now() + 300_000;
-
-  for (let i = 0; i < targets.length; i++) {
-    if (Date.now() > deadline) {
-      console.warn(`    · tiempo agotado tras ${i}/${targets.length} clics`);
-      break;
-    }
-
-    const { chapter } = targets[i];
-    onChapter?.(i + 1, targets.length, chapter);
-
-    try {
-      await ensureCurriculumOutlineView(page, startUrl);
-      await ensureOutlineChapterVisible(page, chapter);
-
-      const viewBefore = new URL(page.url()).searchParams.get('view');
-      const clicked = await page.evaluate(
-        (targetChapter, itemSelectors) => {
-          const helpers = window.__ccnaOutline;
-          const sidebar = helpers?.findOutlineSidebar();
-          if (!sidebar || !helpers) return false;
-
-          const nodes = Array.from(sidebar.querySelectorAll(itemSelectors));
-          let bestEl: HTMLElement | null = null;
-          let bestArea = Infinity;
-
-          for (const el of nodes) {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0 || rect.height > 80)
-              continue;
-
-            const label =
-              (el as HTMLElement).innerText?.trim().split('\n')[0] ?? '';
-            if (helpers.chapterFromLabel(label) !== targetChapter) continue;
-
-            const area = rect.width * rect.height;
-            if (area < bestArea) {
-              bestArea = area;
-              bestEl = el as HTMLElement;
-            }
-          }
-
-          if (!bestEl) return false;
-          bestEl.scrollIntoView({ block: 'center' });
-          bestEl.click();
-          return true;
-        },
-        chapter,
-        OUTLINE_ITEM_SELECTORS
-      );
-
-      if (!clicked) continue;
-
-      await Promise.race([
-        page.waitForFunction(
-          (prev) => new URL(location.href).searchParams.get('view') !== prev,
-          { timeout: 3000 },
-          viewBefore
-        ),
-        delay(1200),
-      ]).catch(() => undefined);
-
-      const stuck = await page
-        .evaluate(() => {
-          const text = document.body.innerText.trim();
-          return text.length < 80 && !text.includes('Course Outline');
-        })
-        .catch(() => false);
-
-      if (stuck) {
-        await page.goto(startUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: 90_000,
-        });
-        await waitForSpinners(page).catch(() => undefined);
-        await injectOutlineHelpers(page);
-        await delay(400);
-        continue;
-      }
-
-      const viewAfter = new URL(page.url()).searchParams.get('view');
-      if (
-        viewAfter &&
-        viewAfter !== viewBefore &&
-        UUID.test(viewAfter) &&
-        !usedViews.has(viewAfter)
-      ) {
-        collected.set(chapter, viewAfter);
-        usedViews.add(viewAfter);
-      }
-    } catch (e) {
-      console.warn(`    · capítulo ${chapter} omitido en clic: ${String(e)}`);
-      await page
-        .goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 })
-        .catch(() => undefined);
-      await injectOutlineHelpers(page).catch(() => undefined);
-      await delay(400);
-    }
-  }
-
-  if (collected.size === 0) return [];
-
-  if (page.url() !== startUrl) {
-    await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
-    await injectOutlineHelpers(page);
-  }
-
-  return [...collected.entries()].map(([chapter, viewId]) => ({
-    chapter,
-    viewId,
-  }));
 }
 
 /** Capítulos X.Y visibles en el outline lateral (sin view ID). */
