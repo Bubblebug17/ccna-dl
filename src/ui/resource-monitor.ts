@@ -1,5 +1,7 @@
 import { ChildProcess, execFile, spawn } from 'child_process';
+import { readdirSync, readFileSync } from 'fs';
 import { freemem, totalmem } from 'os';
+import { memAvailableMb } from '../platform';
 
 const MB = 1024 * 1024;
 
@@ -17,7 +19,8 @@ export type MemSample = {
  * Mide la RAM usada cada ~2 s: Node (process.memoryUsage) + el árbol de procesos del Chrome
  * de puppeteer (no el Chrome normal del usuario).
  * - Windows: UN solo PowerShell en segundo plano (Get-CimInstance Win32_Process, sin wmic) que imprime una línea cada 2 s.
- * - Linux/macOS: `ps -A -o pid=,ppid=,rss=` cada 2 s.
+ * - Linux/Android (Termux): /proc/<pid>/status (PPid, VmRSS) y /proc/meminfo (MemAvailable); si falla, `ps`.
+ * - macOS: `ps -A -o pid=,ppid=,rss=` cada 2 s.
  * Si no se puede medir Chrome, solo se muestra la de Node.
  */
 export class ResourceMonitor {
@@ -31,7 +34,7 @@ export class ResourceMonitor {
   private base(): MemSample {
     return {
       nodeMb: Math.round(process.memoryUsage().rss / MB),
-      freeMb: Math.round(freemem() / MB),
+      freeMb: memAvailableMb() ?? Math.round(freemem() / MB),
       totalMb: Math.round(totalmem() / MB),
     };
   }
@@ -76,6 +79,10 @@ export class ResourceMonitor {
   }
 
   private pollPs(root: number): void {
+    if (process.platform === 'linux' || process.platform === ('android' as NodeJS.Platform)) {
+      const t = procTree(root);
+      if (t !== null) return this.update(t ? Math.round(t.sum / 1024) : undefined, t?.n);
+    }
     execFile('ps', ['-A', '-o', 'pid=,ppid=,rss='], { timeout: 1500 }, (err, stdout) => {
       if (err) return this.update();
       const kids = new Map<number, number[]>();
@@ -187,3 +194,33 @@ export function memText(s: MemSample): string {
 
 /** Proceso global: el CLI lo arranca al lanzar Chrome y las barras lo leen. */
 export const monitor = new ResourceMonitor();
+
+/**
+ * Suma VmRSS (kB) del árbol de `root` leyendo /proc. null si /proc no se puede leer
+ * (el llamador cae a `ps`); undefined si el proceso raíz ya no existe.
+ */
+export function procTree(root: number, procDir = '/proc'): { sum: number; n: number } | undefined | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(procDir).filter((d) => /^\d+$/.test(d));
+  } catch {
+    return null;
+  }
+  const kids = new Map<number, number[]>();
+  const rss = new Map<number, number>();
+  for (const d of entries) {
+    try {
+      const st = readFileSync(`${procDir}/${d}/status`, 'utf8');
+      const ppid = Number(/^PPid:\s+(\d+)/m.exec(st)?.[1]);
+      const kb = Number(/^VmRSS:\s+(\d+)/m.exec(st)?.[1] ?? 0);
+      const pid = Number(d);
+      rss.set(pid, kb);
+      if (!kids.has(ppid)) kids.set(ppid, []);
+      kids.get(ppid)!.push(pid);
+    } catch {
+      // proceso que terminó o sin permiso (Android oculta procesos de otras apps): se ignora
+    }
+  }
+  if (rss.size === 0) return null;
+  return sumTree(root, kids, rss);
+}

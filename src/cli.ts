@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { isTermux, resolveBrowser, sharedStorageHint, TERMUX_DEFAULTS } from './platform';
 import './config/env';
 
 import {
@@ -129,9 +130,8 @@ const cmd = command({
     }),
     assetConcurrency: option({
       long: 'asset-concurrency',
-      type: number,
-      defaultValue: () => DEFAULT_ASSET_OPTIONS.concurrency,
-      description: 'Descargas simultáneas de recursos (imágenes, fuentes…) por capítulo.',
+      type: optional(number),
+      description: `Descargas simultáneas de recursos (imágenes, fuentes…) por capítulo (por defecto ${DEFAULT_ASSET_OPTIONS.concurrency}; ${TERMUX_DEFAULTS.assetConcurrency} en Termux).`,
     }),
     retries: option({
       long: 'retries',
@@ -159,11 +159,10 @@ const cmd = command({
     }),
     recycleEvery: option({
       long: 'recycle-every',
-      type: number,
-      defaultValue: () => DEFAULT_RECYCLE_EVERY,
+      type: optional(number),
       description:
         'Cada cuántos capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria del navegador ' +
-        `(0 = nunca; por defecto ${DEFAULT_RECYCLE_EVERY}). También se recicla antes si el heap de JS es alto o queda poca RAM libre.`,
+        `(0 = nunca; por defecto ${DEFAULT_RECYCLE_EVERY}; ${TERMUX_DEFAULTS.recycleEvery} en Termux). También se recicla antes si el heap de JS es alto o queda poca RAM libre.`,
     }),
     noVideos: flag({
       long: 'no-videos',
@@ -209,6 +208,12 @@ const cmd = command({
     noProgress: flag({
       long: 'no-progress',
       description: 'Sin barras ni spinners: solo líneas de texto (útil en logs; se hace solo si la salida no es una terminal).',
+    }),
+    browserPath: option({
+      long: 'browser-path',
+      type: optional(string),
+      description:
+        'Ruta del ejecutable de Chrome/Chromium a usar (también PUPPETEER_EXECUTABLE_PATH). En Termux se usa solo el Chromium del sistema.',
     }),
     debugHeadful: flag({
       long: 'debug-headful',
@@ -281,7 +286,28 @@ const cmd = command({
     if (args.concurrency !== undefined && Math.floor(args.concurrency) > 6) {
       log.warn(`--concurrency ${Math.floor(args.concurrency)} es demasiado alto para el modo HTML; se limita a 6 pestañas (Netacad puede limitar o bloquear muchas pestañas a la vez).`);
     }
-    const plan = planTabs(args.concurrency);
+    const termux = isTermux();
+    if (termux && args.debugHeadful) {
+      log.error('--debug-headful no funciona en Termux: Android no tiene pantalla X11 para la ventana del navegador. Quita la opción (el modo sin ventana funciona igual).');
+      process.exitCode = 2;
+      return;
+    }
+    const recycleEvery = args.recycleEvery ?? (termux ? TERMUX_DEFAULTS.recycleEvery : DEFAULT_RECYCLE_EVERY);
+    const assetConcurrency = args.assetConcurrency ?? (termux ? TERMUX_DEFAULTS.assetConcurrency : DEFAULT_ASSET_OPTIONS.concurrency);
+    const browserChoice = resolveBrowser(args.browserPath, process.env, termux);
+    if (termux) {
+      if (!browserChoice.path) {
+        log.error('Termux: no se encontró Chromium. Instálalo con "pkg install x11-repo && pkg install chromium" o indica --browser-path.');
+        process.exitCode = 2;
+        return;
+      }
+      log.info(`Termux detectado: ${browserChoice.path} (${browserChoice.source}); modo bajo consumo (pestañas ${args.concurrency ?? TERMUX_DEFAULTS.concurrency}, reciclar cada ${recycleEvery}, recursos ${assetConcurrency}).`);
+      const hint = sharedStorageHint(args.outDir);
+      if (hint) log.warn(hint);
+    } else if (browserChoice.path) {
+      log.detail(`Navegador: ${browserChoice.path} (${browserChoice.source})`);
+    }
+    const plan = planTabs(args.concurrency ?? (termux ? TERMUX_DEFAULTS.concurrency : undefined));
     const tabs = plan.tabs;
     if (plan.warn) log.warn(plan.warn);
     else if (plan.auto) {
@@ -291,9 +317,13 @@ const cmd = command({
     const browser = await puppeteer.launch({
       headless: !args.debugHeadful,
       protocolTimeout: 600_000,
+      executablePath: browserChoice.path,
+      // la salida de error de Chromium (dbus, inotify…) no se muestra: dumpio queda en false
+      dumpio: false,
+      env: termux ? { ...process.env, DBUS_SESSION_BUS_ADDRESS: 'disabled:' } : process.env,
       args: [
         '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        ...chromeLaunchArgs({ headful: args.debugHeadful }),
+        ...chromeLaunchArgs({ headful: args.debugHeadful, lowMemory: termux }),
       ],
     });
     // indicador de memoria: Node + árbol de procesos del Chrome de puppeteer, cada ~2 s
@@ -460,7 +490,7 @@ const cmd = command({
               partial: !!args.only,
               retries: Math.max(0, Math.floor(args.retries)),
               concurrency: tabs,
-              recycleEvery: Math.max(0, Math.floor(args.recycleEvery)),
+              recycleEvery: Math.max(0, Math.floor(recycleEvery)),
               videos: !args.noVideos,
               animations: !args.noAnimations,
               debugNetwork: args.debugNetwork,
@@ -476,7 +506,7 @@ const cmd = command({
               },
               assetOpts: {
                 ...DEFAULT_ASSET_OPTIONS,
-                concurrency: Math.max(1, Math.floor(args.assetConcurrency)),
+                concurrency: Math.max(1, Math.floor(assetConcurrency)),
                 retries: Math.max(0, Math.floor(args.retries)),
               },
             });

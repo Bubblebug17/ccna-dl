@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { ffmpegBin } from './platform';
 import { mkdir, rename, rm, stat } from 'fs/promises';
 import { dirname } from 'path';
 
@@ -45,7 +46,7 @@ export async function ffmpegDownload(
   await mkdir(dirname(dest), { recursive: true });
   const part = dest + '.part';
   await rm(part, { force: true }).catch(() => undefined);
-  const bin = process.env.FFMPEG_PATH || 'ffmpeg';
+  const bin = ffmpegBin();
   const args = buildFfmpegArgs(url, part, headers);
 
   await new Promise<void>((resolve, reject) => {

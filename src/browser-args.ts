@@ -6,7 +6,7 @@
  * - Tope de heap de JS por renderer (1,5 GB): si una página se desboca, se reinicia la pestaña en vez de ahogar el PC.
  * NO se usa --renderer-process-limit: obligaría a compartir proceso entre pestañas (peor aislamiento y fugas compartidas).
  */
-export function chromeLaunchArgs(opts: { headful?: boolean } = {}): string[] {
+export function chromeLaunchArgs(opts: { headful?: boolean; lowMemory?: boolean } = {}): string[] {
   const args = [
     '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows',
@@ -28,5 +28,22 @@ export function chromeLaunchArgs(opts: { headful?: boolean } = {}): string[] {
     '--js-flags=--max-old-space-size=1536',
   ];
   if (!opts.headful) args.push('--disable-gpu');
+  if (opts.lowMemory) {
+    // Termux/Android: sin sandbox (no hay setuid), sin GPU, heap JS más bajo y menos procesos de fondo
+    const i = args.indexOf('--js-flags=--max-old-space-size=1536');
+    args[i] = '--js-flags=--max-old-space-size=512';
+    args.push(
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-software-rasterizer',
+      '--no-zygote',
+      '--disable-crash-reporter',
+      '--disable-notifications',
+      '--disable-speech-api',
+      '--password-store=basic',
+      '--use-mock-keychain',
+      '--log-level=3',
+    );
+  }
   return args;
 }

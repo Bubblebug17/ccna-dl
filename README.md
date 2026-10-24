@@ -144,6 +144,7 @@ Todo lo que generan estas opciones se guarda en `<curso>/debug/`.
 | `--debug-network` | Guarda `debug/red-<capítulo>.json` con las peticiones de red y las animaciones detectadas, sin cookies, cabeceras ni tokens. Úsala con `--only`. |
 | `--debug-screenshot` | Guarda `debug/course.png` con una captura de la vista del curso tras el login. |
 | `--debug-headful` | Abre el navegador con ventana visible. |
+| `--browser-path RUTA` | Chrome/Chromium a usar (también `PUPPETEER_EXECUTABLE_PATH`; en Termux se detecta solo). |
 
 Los nombres antiguos (`--dump-network`, `--screenshot`, `--headful`) terminan con un error que indica el nuevo. También se quitaron `--format`, `--timeout`/`-t` y `--block-media`.
 
@@ -157,6 +158,66 @@ node scripts/validate-download.js --root D:\cursos [--course <texto>] [--out inf
 node scripts/clean-fake-chapters.js --root D:\cursos            # simulación (--dry-run, por defecto)
 node scripts/clean-fake-chapters.js --root D:\cursos --apply    # aplica y guarda copia en <curso>/.limpieza-*/
 ```
+
+## Uso en Termux (Android)
+
+Funciona en un teléfono Android (probado para Android 15, aarch64) usando el **Chromium de Termux** en lugar del Chrome que descarga puppeteer (no existe para Android). El programa detecta Termux solo (`PREFIX` con `com.termux`, `TERMUX_VERSION` o Node para Android) y entonces:
+
+- usa `$PREFIX/bin/chromium-browser` (o `chromium`); `--browser-path` o `PUPPETEER_EXECUTABLE_PATH` tienen prioridad;
+- lanza Chromium sin ventana con `--no-sandbox --disable-gpu --disable-dev-shm-usage`, heap de JS de 512 MB y sin procesos de fondo; los avisos de dbus/inotify de Chromium no se muestran;
+- baja los valores por defecto: `--concurrency 1`, `--recycle-every 3`, `--asset-concurrency 3` (puedes cambiarlos con las mismas opciones);
+- mide la memoria con `/proc/<pid>/status` y `/proc/meminfo` (si Android no deja leerlos, el indicador solo muestra Node);
+- `--debug-headful` no está disponible (no hay pantalla).
+
+### Instalación paso a paso
+
+```bash
+pkg update && pkg upgrade
+pkg install nodejs-lts git ffmpeg x11-repo
+pkg install chromium
+termux-setup-storage            # solo si quieres guardar en el almacenamiento del teléfono (acepta el permiso)
+
+git clone https://github.com/Bubblebug17/ccna-dl
+cd ccna-dl
+git checkout feat/termux
+PUPPETEER_SKIP_DOWNLOAD=1 npm install   # no descarga Chrome (también lo omite .puppeteerrc.cjs en Termux)
+npm run build
+bash scripts/termux-check.sh            # comprueba arquitectura, RAM, node, chromium, ffmpeg y una prueba sin ventana
+cp .env.example .env && nano .env       # opcional: PASSWORD=
+```
+
+### Uso
+
+```bash
+termux-wake-lock    # evita que Android suspenda Termux con la pantalla apagada (termux-wake-unlock al terminar)
+node lib/cli.js -u tu@correo.com -c 1 --only 1 \
+  --out-dir ~/storage/shared/Download/ccna "https://www.netacad.com/es/launch?id=<id>"
+```
+
+`~/storage/shared/...` es el almacenamiento interno del teléfono (carpeta `Download/ccna` en el explorador de archivos). Si no existe, ejecuta `termux-setup-storage`.
+
+### Consejos de RAM
+
+- Cierra las demás apps antes de empezar; Chromium + Node usan ~600 MB–1 GB con una pestaña.
+- Descarga por partes con `--only` (módulo a módulo) y usa `--resume`/sin `--force` para continuar.
+- Si va justo de memoria: `--no-animations`, `--no-videos` o `--recycle-every 1`.
+- Mantén `termux-wake-lock` activo y el teléfono cargando; quita la optimización de batería de Termux en Ajustes.
+
+### Plan B: proot-distro con Debian
+
+Si el Chromium de Termux falla (por ejemplo tras una actualización), usa Debian dentro de Termux:
+
+```bash
+pkg install proot-distro
+proot-distro install debian
+proot-distro login debian
+apt update && apt install -y chromium ffmpeg git nodejs npm
+git clone https://github.com/Bubblebug17/ccna-dl && cd ccna-dl && git checkout feat/termux
+PUPPETEER_SKIP_DOWNLOAD=1 npm install && npm run build
+node lib/cli.js --browser-path /usr/bin/chromium -c 1 --recycle-every 3 --asset-concurrency 3 -u tu@correo.com --only 1 "<url>"
+```
+
+Dentro de Debian no se detecta Termux, por eso se indican `--browser-path` y los valores bajos a mano (o `CCNA_DL_TERMUX=1` para activar el modo Termux). El almacenamiento del teléfono está en `/sdcard` si arrancas con `proot-distro login debian --bind /sdcard`.
 
 ## Carpeta de salida
 

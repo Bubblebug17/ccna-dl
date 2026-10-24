@@ -18,6 +18,7 @@
 11. [Solución de problemas](#11-solución-de-problemas)
 12. [Limitaciones conocidas y riesgos](#12-limitaciones-conocidas-y-riesgos)
 13. [Estado de las descargas existentes y changelog](#13-estado-de-las-descargas-existentes-y-changelog)
+14. [Uso en Termux (Android)](#14-uso-en-termux-android)
 
 ---
 
@@ -110,7 +111,7 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--user`, `-u` | — | Correo/usuario de Netacad (obligatorio salvo con `--validate`). |
 | `--password`, `-p` | `.env` → pregunta | Contraseña. |
 | `--concurrency`, `-c N` | **2** automático (baja a 1 con poca RAM libre; máx. **6**) | Capítulos descargados a la vez (pestañas del navegador en paralelo). Cada pestaña puede usar ~1 GB; con un valor explícito se respeta pero se avisa si no cabe en la RAM libre. |
-| `--recycle-every N` | **8** (`0` = nunca) | Cada `N` capítulos se vacía y se cierra/reabre la pestaña de cada worker para liberar la memoria del renderer de Chrome. También se recicla antes si el heap de JS de la pestaña supera ~600 MB o la RAM libre baja de ~700 MB. La pestaña de la sesión no se cierra: se cambia de proceso (`chrome://version` → `about:blank`). |
+| `--recycle-every N` | **8** (`0` = nunca; **3** en Termux) | Cada `N` capítulos se vacía y se cierra/reabre la pestaña de cada worker para liberar la memoria del renderer de Chrome. También se recicla antes si el heap de JS de la pestaña supera ~600 MB o la RAM libre baja de ~700 MB. La pestaña de la sesión no se cierra: se cambia de proceso (`chrome://version` → `about:blank`). |
 | `--no-videos` | desactivado | No activa los reproductores ni descarga vídeos (se queda el póster, como antes de la v. 3 del formato). Esos capítulos se guardan con formato 2 y la reanudación no los rehace por vídeos pendientes. |
 | `--no-animations` | desactivado | No pulsa «play» en las animaciones interactivas (`<adobe-animate-view>`) ni las graba (§7.6). Sin esta opción cada animación se graba como `.webm` local (hasta 90 s por animación). |
 | `--debug-network` | desactivado | Depuración (§7.6): escribe `<curso>/debug/red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red de la activación, **sin cookies, cabeceras ni valores de query** (solo nombres de parámetros; los tramos de ruta que parecen tokens salen como `<token>`). |
@@ -123,10 +124,11 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--chapter-timeout s` | **300** | Segundos máximos por intento de capítulo; al agotarse se reinicia esa pestaña y se reintenta. |
 | `--fast` | desactivado | Modo rápido (opt-in, menos seguro): esperas más cortas y bloquea también `adobedtm` (el vídeo/audio también se bloquea con `--no-videos`). |
 | `--no-block-trackers` | bloqueo activo | No bloquear analítica/publicidad/seguimiento. |
-| `--asset-concurrency N` | **6** | Descargas simultáneas de recursos por capítulo. |
+| `--asset-concurrency N` | **6** (**3** en Termux) | Descargas simultáneas de recursos por capítulo. |
 | `--retries N` | **3** | Reintentos con espera creciente (recursos y capítulos fallidos; los reintentos de capítulo se limitan a 2 extra). |
 | `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png` (vista del curso tras el login). |
-| `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). |
+| `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). No disponible en Termux. |
+| `--browser-path RUTA` | auto | Ejecutable de Chrome/Chromium (también `PUPPETEER_EXECUTABLE_PATH`). En Termux se usa `$PREFIX/bin/chromium-browser`. |
 | `--verbose`, `-v N` | **2** | Verbosidad `1`-`3`. **1**: barras, avisos (`⚠`), errores (`✖`), capítulos parciales/fallidos y resumen final. **2**: además, el logo, los pasos principales (alumno, curso, capítulos encontrados) y una línea por capítulo guardado. **3**: además, login paso a paso, URLs, capítulos omitidos o que se rehacen y por qué, reintentos, reciclado/reinicio de pestañas y (sin terminal) una línea `[memoria]` cada 30 s. Los avisos y errores se ven siempre; las opciones `--debug-*` funcionan igual en cualquier nivel. |
 | `--no-banner` | desactivado | No imprime el logo ASCII (con `-v 1` tampoco se imprime). |
 | `--no-color` | desactivado | Sin colores ANSI. Los colores también se apagan con `NO_COLOR=1`, `TERM=dumb` o si la salida no es una terminal; `FORCE_COLOR=1` los fuerza. |
@@ -615,3 +617,66 @@ La rama principal `master` está en `2772302` (v1.4.0 original, sin estas mejora
 ---
 
 *Documento generado a partir del código real (`src/cli.ts`, `README.md` y los módulos de `src/`). Si cambias opciones, actualiza este archivo.*
+
+---
+
+## 14. Uso en Termux (Android)
+
+Funciona en un teléfono Android (probado para Android 15, aarch64) usando el **Chromium de Termux** en lugar del Chrome que descarga puppeteer (no existe para Android). El programa detecta Termux solo (`PREFIX` con `com.termux`, `TERMUX_VERSION` o Node para Android) y entonces:
+
+- usa `$PREFIX/bin/chromium-browser` (o `chromium`); `--browser-path` o `PUPPETEER_EXECUTABLE_PATH` tienen prioridad;
+- lanza Chromium sin ventana con `--no-sandbox --disable-gpu --disable-dev-shm-usage`, heap de JS de 512 MB y sin procesos de fondo; los avisos de dbus/inotify de Chromium no se muestran;
+- baja los valores por defecto: `--concurrency 1`, `--recycle-every 3`, `--asset-concurrency 3` (puedes cambiarlos con las mismas opciones);
+- mide la memoria con `/proc/<pid>/status` y `/proc/meminfo` (si Android no deja leerlos, el indicador solo muestra Node);
+- `--debug-headful` no está disponible (no hay pantalla).
+
+### 14.1 Instalación paso a paso
+
+```bash
+pkg update && pkg upgrade
+pkg install nodejs-lts git ffmpeg x11-repo
+pkg install chromium
+termux-setup-storage            # solo si quieres guardar en el almacenamiento del teléfono (acepta el permiso)
+
+git clone https://github.com/Bubblebug17/ccna-dl
+cd ccna-dl
+git checkout feat/termux
+PUPPETEER_SKIP_DOWNLOAD=1 npm install   # no descarga Chrome (también lo omite .puppeteerrc.cjs en Termux)
+npm run build
+bash scripts/termux-check.sh            # comprueba arquitectura, RAM, node, chromium, ffmpeg y una prueba sin ventana
+cp .env.example .env && nano .env       # opcional: PASSWORD=
+```
+
+### 14.2 Uso
+
+```bash
+termux-wake-lock    # evita que Android suspenda Termux con la pantalla apagada (termux-wake-unlock al terminar)
+node lib/cli.js -u tu@correo.com -c 1 --only 1 \
+  --out-dir ~/storage/shared/Download/ccna "https://www.netacad.com/es/launch?id=<id>"
+```
+
+`~/storage/shared/...` es el almacenamiento interno del teléfono (carpeta `Download/ccna` en el explorador de archivos). Si no existe, ejecuta `termux-setup-storage`.
+
+### 14.3 Consejos de RAM
+
+- Cierra las demás apps antes de empezar; Chromium + Node usan ~600 MB–1 GB con una pestaña.
+- Descarga por partes con `--only` (módulo a módulo) y usa `--resume`/sin `--force` para continuar.
+- Si va justo de memoria: `--no-animations`, `--no-videos` o `--recycle-every 1`.
+- Mantén `termux-wake-lock` activo y el teléfono cargando; quita la optimización de batería de Termux en Ajustes.
+
+### 14.4 Plan B: proot-distro con Debian
+
+Si el Chromium de Termux falla (por ejemplo tras una actualización), usa Debian dentro de Termux:
+
+```bash
+pkg install proot-distro
+proot-distro install debian
+proot-distro login debian
+apt update && apt install -y chromium ffmpeg git nodejs npm
+git clone https://github.com/Bubblebug17/ccna-dl && cd ccna-dl && git checkout feat/termux
+PUPPETEER_SKIP_DOWNLOAD=1 npm install && npm run build
+node lib/cli.js --browser-path /usr/bin/chromium -c 1 --recycle-every 3 --asset-concurrency 3 -u tu@correo.com --only 1 "<url>"
+```
+
+Dentro de Debian no se detecta Termux, por eso se indican `--browser-path` y los valores bajos a mano (o `CCNA_DL_TERMUX=1` para activar el modo Termux). El almacenamiento del teléfono está en `/sdcard` si arrancas con `proot-distro login debian --bind /sdcard`.
+
