@@ -1056,6 +1056,8 @@ export type SaveChapterOptions = {
   prescrolled?: boolean;
   /** Re-captura: espera el doble (mínimo y ventana de estabilidad). */
   patient?: boolean;
+  /** Avisa de la fase actual (para la barra de la pestaña en la terminal). */
+  onStage?: (stage: string) => void;
 };
 
 /** Marca de captura con carga sin terminar (el modo reanudar la vuelve a descargar). */
@@ -1150,6 +1152,7 @@ export async function saveChapterHtml(
     if (pass > 0 || !saveOpts.prescrolled) await scrollLaunchContent(page);
     // 1ª pasada tras prepareChapter (ya esperó red, DOM estable y --min-wait): basta un silencio corto
     const justPrepared = pass === 0 && !patient && !!saveOpts.prescrolled;
+    saveOpts.onStage?.(pass > 0 ? 'esperando (2ª pasada)' : 'esperando contenido');
     await waitForContentStable(page, {
       quietMs: patient ? pol.stableMs * 2 : justPrepared ? Math.min(150, pol.stableMs) : pol.stableMs,
       maxMs: patient ? pol.maxStableMs * 2 : Math.min(pol.maxStableMs, 4000),
@@ -1157,10 +1160,12 @@ export async function saveChapterHtml(
     });
     // los reproductores de vídeo son perezosos (solo póster hasta pulsar play): se activan antes de serializar
     if (pass === 0 && wantVideos) {
+      saveOpts.onStage?.('vídeos');
       videoCapture = await captureVideos(page).catch(() => videoCapture);
     }
     // animaciones (canvas dibujado por JS): se pulsa play y se graba; sin esto el canvas queda vacío offline
     if (pass === 0 && wantAnimations) {
+      saveOpts.onStage?.('animaciones');
       animCapture = await captureAnimations(page, { siteDir, maxMs: saveOpts.animationMaxMs }).catch(() => animCapture);
     }
     // fuentes cargadas y animaciones CSS/Web Animations finitas terminadas: se guarda el estado FINAL
@@ -1208,6 +1213,7 @@ export async function saveChapterHtml(
     return { ...none(data.title), problems: ['no se encontró el contenido del capítulo (iframe vacío)'] };
   }
 
+  saveOpts.onStage?.(`recursos (${Object.keys(data.assets).length})`);
   const batch = await downloadAssets(
     page,
     data.assets,
@@ -1236,6 +1242,7 @@ export async function saveChapterHtml(
   }
 
   // subtítulos descargados -> en línea (data:), para que funcionen abriendo el HTML con file://
+  saveOpts.onStage?.('escribiendo HTML');
   const tracks = await inlineLocalTracks(data.html, siteDir);
   data.html = tracks.html;
 

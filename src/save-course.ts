@@ -45,7 +45,7 @@ export type SaveCourseOptions = {
   assetOpts: AssetOptions;
   /** Navega al capítulo y espera a que cargue (login/outline/spinners). */
   prepareChapter: (page: Page, chapterUrl: string) => Promise<void>;
-  log?: (msg: string) => void;
+  log?: (msg: string, level?: 1 | 2 | 3) => void;
   /**
    * Pestañas (páginas de puppeteer) que procesan capítulos a la vez, todas en el
    * mismo navegador y sesión. 1 (por defecto) = secuencial, como antes.
@@ -177,11 +177,11 @@ export async function saveLaunchCourseSite(
 
   const lanes = Math.max(1, Math.min(Math.floor(opts.concurrency ?? 1) || 1, Math.max(1, todo.length)));
   const timeoutMs = opts.chapterTimeoutMs ?? DEFAULT_CHAPTER_TIMEOUT_MS;
-  const progress = createProgress(todo.length, { enabled: opts.progressBar });
+  const progress = createProgress(todo.length, { enabled: opts.progressBar, lanes });
   const log = opts.log ?? progress.log;
   for (const l of preLogs) log(l);
   for (const d of dedup.dropped) {
-    log(`⚠ Se ignora el elemento ${d.chapter}: usaría el mismo archivo (${chapterFileName(d.fileId)}) que ${d.keptChapter} y lo sobrescribiría.`);
+    log(`⚠ Se ignora el elemento ${d.chapter}: usaría el mismo archivo (${chapterFileName(d.fileId)}) que ${d.keptChapter} y lo sobrescribiría.`, 1);
   }
   if (!opts.retryFailed) {
     log(
@@ -211,7 +211,7 @@ export async function saveLaunchCourseSite(
       const c = checks[idx];
       const v = c.ok ? c.value : undefined;
       if (v && chapterUpToDate(v, wantVideos, wantAnimations)) {
-        log(`${tag(idx)} · omitido (ya guardado y verificado)`);
+        log(`${tag(idx)} · omitido (ya guardado y verificado)`, 3);
         outcomes[idx] = { chapter, url: todo[idx], status: 'omitido' };
         progress.tick();
         continue;
@@ -226,7 +226,7 @@ export async function saveLaunchCourseSite(
             : wantAnimations && (v.animationsPending ?? 0) > 0
               ? `${v.animationsPending} animación(es) sin recursos locales (se grabarán)`
               : `formato antiguo (v${v.format}, faltan pestañas/fuentes)`;
-        log(`${tag(idx)} · se vuelve a descargar: ${why}`);
+        log(`${tag(idx)} · se vuelve a descargar: ${why}`, 3);
       }
       queue.push(idx);
     }
@@ -246,7 +246,7 @@ export async function saveLaunchCourseSite(
     await emulateFocus(p);
   };
   const replacePage = async (w: Worker, why: string) => {
-    log(`    · pestaña ${w.id + 1}: se reinicia (${why})`);
+    log(`    · pestaña ${w.id + 1}: se reinicia (${why})`, 3);
     const old = w.page;
     if (w.own) {
       await old.close().catch(() => undefined);
@@ -277,6 +277,8 @@ export async function saveLaunchCourseSite(
     const filePath = join(chaptersDir, fileName);
     const label = lanes > 1 ? `${tag(idx)} (pestaña ${w.id + 1})` : tag(idx);
     const tStart = Date.now();
+    const bar = progress.lane(w.id);
+    bar.start(chapter, label);
 
     let res: SaveChapterResult | null = null;
     let lastError = '';
@@ -285,9 +287,11 @@ export async function saveLaunchCourseSite(
       try {
         if (attempt > 1) {
           const wait = backoffMs(attempt - 2, 1000, 8000);
-          log(`${label} · reintento ${attempt - 1}/${chapterAttempts - 1} en ${Math.round(wait / 1000)}s (${lastError})`);
+          log(`${label} · reintento ${attempt - 1}/${chapterAttempts - 1} en ${Math.round(wait / 1000)}s (${lastError})`, 3);
+          bar.stage(`reintento ${attempt - 1} en ${Math.round(wait / 1000)}s`);
           await delay(wait);
         }
+        bar.stage('abriendo');
         const wp = w.page;
         res = await withTimeout(
           (async () => {
@@ -298,11 +302,12 @@ export async function saveLaunchCourseSite(
               animations: wantAnimations,
               debugNetwork: opts.debugNetwork,
               animationMaxMs: opts.animationMaxMs,
+              onStage: bar.stage,
             });
             // Carga sin terminar al guardar (loader/skeleton visible): recarga y re-captura UNA vez, con más paciencia.
             if (r.ok && r.incomplete && !fullRecapture) {
               fullRecapture = true;
-              log(`${label} · carga sin terminar (${r.incomplete}); se recarga y se vuelve a capturar`);
+              log(`${label} · carga sin terminar (${r.incomplete}); se recarga y se vuelve a capturar`, 3);
               await opts.prepareChapter(wp, chapterUrl);
               const r2 = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
                 prescrolled: !!opts.prepareScrolls,
@@ -311,6 +316,7 @@ export async function saveLaunchCourseSite(
                 debugNetwork: opts.debugNetwork,
                 animationMaxMs: opts.animationMaxMs,
                 patient: true,
+                onStage: (st) => bar.stage('2ª captura: ' + st),
               });
               if (r2.ok) r = { ...r2, recaptured: true };
             }
@@ -328,7 +334,7 @@ export async function saveLaunchCourseSite(
         if (w.id > 0 && SESSION_RE.test(lastError) && w.done === 0) {
           if (!extraTabsDisabled) {
             extraTabsDisabled = true;
-            log(`    · las pestañas extra no comparten la sesión (${lastError}); se continúa con la pestaña principal`);
+            log(`    · las pestañas extra no comparten la sesión (${lastError}); se continúa con la pestaña principal`, 3);
           }
           requeue.push(idx);
           w.retired = true;
@@ -356,7 +362,7 @@ export async function saveLaunchCourseSite(
       const tabsInfo = res.tabs.widgets ? `, pestañas ${res.tabs.captured}/${res.tabs.tabs}` : '';
       if (res.incomplete) {
         const reason = `captura posiblemente incompleta: ${res.incomplete}` + (failedAssets.length ? `; ${failedAssets.length} recursos fallidos` : '');
-        log(`${label} · ⚠ parcial: ${reason} (${fmtMs(ms)})`);
+        log(`${label} · ⚠ parcial: ${reason} (${fmtMs(ms)})`, 1);
         outcomes[idx] = {
           chapter,
           url: chapterUrl,
@@ -375,7 +381,7 @@ export async function saveLaunchCourseSite(
         outcomes[idx] = { chapter, url: chapterUrl, status: 'guardado', reason: res.warnings.join(' | '), assets: res.assets, assetsFailed: 0, ms };
       } else {
         const reason = `${failedAssets.length}/${res.assets} recursos no se descargaron: ${failedAssets[0][1]}`;
-        log(`${label} · ⚠ parcial: ${reason} (${fmtMs(ms)})`);
+        log(`${label} · ⚠ parcial: ${reason} (${fmtMs(ms)})`, 1);
         outcomes[idx] = {
           chapter,
           url: chapterUrl,
@@ -388,9 +394,10 @@ export async function saveLaunchCourseSite(
         };
       }
     } else {
-      log(`${label} · ✖ fallido: ${lastError} (${fmtMs(ms)})`);
+      log(`${label} · ✖ fallido: ${lastError} (${fmtMs(ms)})`, 1);
       outcomes[idx] = { chapter, url: chapterUrl, status: 'fallido', reason: lastError, ms };
     }
+    bar.idle();
     w.done++;
     doneMs += ms;
     doneCount++;
@@ -398,7 +405,7 @@ export async function saveLaunchCourseSite(
     const left = queue.length - doneCount;
     if (left > 0 && doneCount >= 2 && !process.stdout.isTTY) {
       const wall = (Date.now() - t0) / doneCount;
-      log(`    progreso ${doneCount}/${queue.length} · ETA ~${fmtDuration(wall * left)}`);
+      log(`    progreso ${doneCount}/${queue.length} · ETA ~${fmtDuration(wall * left)}`, 3);
     }
   };
 
@@ -416,7 +423,7 @@ export async function saveLaunchCourseSite(
    * pestaña de la sesión -> solo about:blank (no se cierra: conserva la sesión).
    */
   const recycleTab = async (w: Worker, why: string) => {
-    log(`    · pestaña ${w.id + 1}: reciclada (${why})`);
+    log(`    · pestaña ${w.id + 1}: reciclada (${why})`, 3);
     w.since = 0;
     recycled++;
     const old = w.page;
@@ -432,7 +439,7 @@ export async function saveLaunchCourseSite(
       w.page = await makePage();
       await prepareWorkerPage(w.page);
     } catch (e) {
-      log(`    · pestaña ${w.id + 1}: no se pudo reabrir (${e instanceof Error ? e.message : e}); se retira`);
+      log(`    · pestaña ${w.id + 1}: no se pudo reabrir (${e instanceof Error ? e.message : e}); se retira`, 3);
       w.retired = true;
     }
   };
@@ -461,7 +468,7 @@ export async function saveLaunchCourseSite(
         // nunca debe pasar (processChapter captura todo); por seguridad, no perder el capítulo
         const chapter = chapterIdFromUrl(todo[idx]);
         const msg = e instanceof Error ? e.message : String(e);
-        log(`${tag(idx)} · ✖ fallido: error interno: ${msg}`);
+        log(`${tag(idx)} · ✖ fallido: error interno: ${msg}`, 1);
         outcomes[idx] = { chapter, url: todo[idx], status: 'fallido', reason: `error interno: ${msg}` };
         progress.tick();
       }
@@ -477,7 +484,7 @@ export async function saveLaunchCourseSite(
         await prepareWorkerPage(p);
         workers.push({ id: i, page: p, own: true, retired: false, done: 0, since: 0 });
       } catch (e) {
-        log(`    · no se pudo abrir la pestaña ${i + 1}: ${e instanceof Error ? e.message : e}`);
+        log(`    · no se pudo abrir la pestaña ${i + 1}: ${e instanceof Error ? e.message : e}`, 3);
         break;
       }
     }
@@ -500,7 +507,7 @@ export async function saveLaunchCourseSite(
   const fromDisk = await entriesFromSavedChapters(chaptersDir);
   const indexEntries = mergeIndexEntries(fromDisk, entries.filter((e): e is IndexEntry => !!e));
   if (indexEntries.length === 0) {
-    log('No hay capítulos guardados. No se actualiza index.html para no borrar el índice anterior.');
+    log('No hay capítulos guardados. No se actualiza index.html para no borrar el índice anterior.', 1);
   } else {
     indexPath = join(siteDir, 'index.html');
     const tmp = `${indexPath}.part`;
@@ -512,27 +519,27 @@ export async function saveLaunchCourseSite(
   const failures = mergeFailures(previous, processed.filter((o) => o.status !== 'omitido'));
   const files = await writeRunFiles(siteDir, info, processed, failures, startedAt, !!opts.partial || opts.retryFailed);
   const t = totalsOf(processed);
-  if (opts.partial || opts.retryFailed) log('Ejecución parcial: el resumen y el índice se han mezclado con lo ya existente; el resto del curso no se ha tocado.');
+  if (opts.partial || opts.retryFailed) log('Ejecución parcial: el resumen y el índice se han mezclado con lo ya existente; el resto del curso no se ha tocado.', 1);
   const wallMs = Date.now() - t0;
-  log('');
-  log('════════ Resumen ════════');
-  log(`Curso: ${courseTitle}`);
-  log(`Capítulos: ${t.total} · guardados ${t.guardado} · omitidos ${t.omitido} · parciales ${t.parcial} · fallidos ${t.fallido}`);
-  if (recycled > 0) log(`Pestañas recicladas: ${recycled} (liberan memoria del navegador)`);
-  log(`Duración: ${fmtDuration(wallMs)}` + (workers.length > 1 && sumWorkMs.v > 0 ? ` (${workers.length} pestañas; suma de tiempos por capítulo ${fmtDuration(sumWorkMs.v)}, ganancia ×${(sumWorkMs.v / Math.max(1, wallMs)).toFixed(1)})` : ''));
+  log('', 1);
+  log('════════ Resumen ════════', 1);
+  log(`Curso: ${courseTitle}`, 1);
+  log(`Capítulos: ${t.total} · guardados ${t.guardado} · omitidos ${t.omitido} · parciales ${t.parcial} · fallidos ${t.fallido}`, 1);
+  if (recycled > 0) log(`Pestañas recicladas: ${recycled} (liberan memoria del navegador)`, 1);
+  log(`Duración: ${fmtDuration(wallMs)}` + (workers.length > 1 && sumWorkMs.v > 0 ? ` (${workers.length} pestañas; suma de tiempos por capítulo ${fmtDuration(sumWorkMs.v)}, ganancia ×${(sumWorkMs.v / Math.max(1, wallMs)).toFixed(1)})` : ''), 1);
   if (aborted) {
-    log(`Interrumpido: ${pending} capítulo(s) sin procesar. Vuelve a ejecutar el mismo comando para continuar (se omiten los ya guardados).`);
+    log(`Interrumpido: ${pending} capítulo(s) sin procesar. Vuelve a ejecutar el mismo comando para continuar (se omiten los ya guardados).`, 1);
   }
   for (const o of processed.filter((x) => x.status === 'parcial' || x.status === 'fallido')) {
-    log(`  - ${o.chapter} [${o.status}] ${o.reason ?? ''}`);
+    log(`  - ${o.chapter} [${o.status}] ${o.reason ?? ''}`, 1);
   }
   if (failures.length) {
-    log(`Pendientes: ${failures.length} capítulo(s) en ${files.failuresPath}`);
-    log(`Para reintentar solo esos: ccna-dl --retry-failed <url-del-curso> --user <usuario>`);
+    log(`Pendientes: ${failures.length} capítulo(s) en ${files.failuresPath}`, 1);
+    log(`Para reintentar solo esos: ccna-dl --retry-failed <url-del-curso> --user <usuario>`, 1);
   } else {
-    log(`Sin fallos pendientes. Resumen: ${files.summaryPath}`);
+    log(`Sin fallos pendientes. Resumen: ${files.summaryPath}`, 1);
   }
-  if (indexPath) log(`Abre: ${indexPath}`);
+  if (indexPath) log(`Abre: ${indexPath}`, 1);
   void SUMMARY_FILE;
   void doneMs;
 

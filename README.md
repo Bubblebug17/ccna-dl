@@ -105,7 +105,35 @@ Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y
 | `--asset-concurrency` | `6` | Recursos descargados a la vez por capítulo. |
 | `--fast` | no | Modo rápido y menos seguro: esperas más cortas y más bloqueos. |
 | `--no-block-trackers` | no | No bloquea analítica ni publicidad (por defecto se bloquean). |
+| `-v`, `--verbose` | `2` | Nivel de detalle `1`-`3`: `1` = mínimo (barras, avisos, errores y resumen), `2` = normal (resultado de cada capítulo), `3` = detallado (login paso a paso, reintentos, omitidos, reciclado de pestañas). |
+| `--no-banner` | no | No muestra el logo ASCII al iniciar. |
+| `--no-color` | no | Sin colores. También con la variable `NO_COLOR=1` o al redirigir la salida a un archivo. |
+| `--no-progress` | no | Sin barras ni spinners, solo líneas de texto. Es automático si la salida no es una terminal. |
 | `-h`, `--help` | — | Muestra la ayuda. |
+
+### Interfaz en la terminal
+
+Al iniciar se muestra el logo de `ccna-dl`. Durante la descarga verás:
+
+```
+ ██████████░░░░░░░░░░░░░░░░ 12/31 capítulos · 38% · 4m10s ETA 6m35s
+ ▣ RAM 2.4 GB (node 160 MB · chrome 2.2 GB/9p) · libre 5.1 GB · pico 2.9 GB
+  ⠹ pestaña 1  2.3.2   ███████████████░░░░░░░░░░░    41s  animaciones
+  ⠼ pestaña 2  2.3.3   ██████████████████████░░░░    18s  recursos (52)
+```
+
+- Una barra total con el tiempo y la ETA.
+- El indicador de memoria, actualizado cada ~2 s: Node más todos los procesos del Chrome de puppeteer (no tu Chrome normal). Se pone amarillo con menos de 1,5 GB libres y rojo con menos de 700 MB.
+- Una línea con spinner por pestaña (tantas como `--concurrency`): capítulo, fase (abriendo, esperando contenido, vídeos, animaciones, recursos, escribiendo HTML) y tiempo que lleva.
+
+Si la salida va a un archivo (`> log.txt`) o usas `--no-progress`, se escriben solo líneas de texto, sin colores.
+
+```powershell
+# Salida mínima
+node lib/cli.js -u tu@correo.com -v 1 "<url>"
+# Todo el detalle
+node lib/cli.js -u tu@correo.com -v 3 --only 2.3 "<url>"
+```
 
 ### Depuración
 

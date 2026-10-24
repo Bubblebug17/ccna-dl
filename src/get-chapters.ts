@@ -1,3 +1,4 @@
+import { log } from './ui/log';
 import { HTTPResponse, Page } from 'puppeteer';
 import * as cliProgress from 'cli-progress';
 import { dropShadowedSubchapters } from './chapter-ids';
@@ -68,9 +69,9 @@ export async function getChapterUrls(
   options?: GetChapterOptions
 ): Promise<string[]> {
   if (isLaunchPage(page.url())) {
-    console.log('Getting Launch Chapter URLs');
+    log.detail('Getting Launch Chapter URLs');
     if (options?.only) {
-      console.log(`Modo --only: ${describeOnly(parseOnly(options.only))} (se lee solo el outline de esos módulos).`);
+      log.info(`Modo --only: ${describeOnly(parseOnly(options.only))} (se lee solo el outline de esos módulos).`);
     }
     return getLaunchChapterUrls(page, options);
   }
@@ -358,7 +359,7 @@ async function getLaunchChapterUrls(
         fromNetwork
       );
       if (fromResolved.length < missing.length) {
-        console.warn(
+        log.warn(
           `  · ${missing.length - fromResolved.length} capítulo(s) sin view ID tras resolución: ` +
             `${missing
               .filter((ch) => !fromResolved.some((e) => e.chapter === ch))
@@ -384,7 +385,7 @@ async function getLaunchChapterUrls(
     // coincidiría con "2.2" y la sobrescribiría.
     const shadow = dropShadowedSubchapters(entries);
     if (shadow.dropped.length) {
-      console.warn(
+      log.warn(
         `  · ${shadow.dropped.length} elemento(s) del outline ignorados por ser sub-elementos de una sección existente: ` +
           `${shadow.dropped.map((e) => e.chapter).slice(0, 10).join(', ')}${shadow.dropped.length > 10 ? '…' : ''}`
       );
@@ -397,7 +398,7 @@ async function getLaunchChapterUrls(
       .map((entry) => buildLaunchUrl(baseUrl, entry.viewId, entry.chapter));
 
     await restoreLaunchCurriculumPage(page, baseUrl);
-    console.log(`Encontrados ${urls.length} capítulos en el outline.`);
+    log.step(`Encontrados ${urls.length} capítulos en el outline.`);
     return urls;
   } finally {
     progress.stop();
@@ -492,21 +493,21 @@ async function getLaunchChapterUrlsOnly(
 
     const explicit = new Set(explicitChaptersOfOnly(spec));
     for (const c of missing) {
-      console.warn(
+      log.warn(
         explicit.has(c)
           ? `  ⚠ El capítulo ${c} no existe en el outline (o no se pudo resolver); se continúa con los demás.`
           : `  ⚠ No se pudo resolver el capítulo ${c} del outline; se continúa con los demás.`
       );
     }
     if (entries.length === 0) {
-      console.warn(`  ⚠ --only ${spec.text}: no se encontró ningún capítulo en el outline.`);
+      log.warn(`  ⚠ --only ${spec.text}: no se encontró ningún capítulo en el outline.`);
       await restoreLaunchCurriculumPage(page, page.url());
       return [];
     }
 
     const shadow = dropShadowedSubchapters(entries);
     if (shadow.dropped.length) {
-      console.warn(
+      log.warn(
         `  · ${shadow.dropped.length} elemento(s) del outline ignorados por ser sub-elementos de una sección existente: ` +
           shadow.dropped.map((e) => e.chapter).join(', ')
       );
@@ -518,7 +519,7 @@ async function getLaunchChapterUrlsOnly(
       .sort((a, b) => compareChapter(a.chapter, b.chapter))
       .map((entry) => buildLaunchUrl(baseUrl, entry.viewId, entry.chapter));
     await restoreLaunchCurriculumPage(page, baseUrl);
-    console.log(
+    log.info(
       `Encontrados ${urls.length} capítulo(s) pedidos (${describeOnly(spec)}) en ${((Date.now() - t0) / 1000).toFixed(1)} s, leyendo solo el módulo ${mods.join(', ')} del outline.`
     );
     return urls;
@@ -762,7 +763,7 @@ async function collectViewsForMissingChapters(
     );
     if (modChapters.length === 0) continue;
 
-    console.log(
+    log.info(
       `  · React módulo ${mod} (${modChapters.length} capítulo(s) pendientes)…`
     );
     await expandModuleForChapter(page, modChapters[0]).catch(() => undefined);
@@ -775,7 +776,7 @@ async function collectViewsForMissingChapters(
     try {
       fromReact = await collectViewsFromReactOutline(page);
     } catch (e) {
-      console.warn(`  · React falló en módulo ${mod}: ${String(e)}`);
+      log.warn(`  · React falló en módulo ${mod}: ${String(e)}`);
       continue;
     }
 
@@ -785,14 +786,14 @@ async function collectViewsForMissingChapters(
         results.push(hit);
         resolved.add(ch);
         networkSink?.set(hit.viewId, ch);
-        console.log(`  · ${ch} → view=${hit.viewId.slice(0, 8)}…`);
+        log.detail(`  · ${ch} → view=${hit.viewId.slice(0, 8)}…`);
       }
     }
   }
 
   for (const ch of chapters) {
     if (!resolved.has(ch)) {
-      console.warn(`  · no se pudo resolver view para ${ch}`);
+      log.warn(`  · no se pudo resolver view para ${ch}`);
     }
   }
 

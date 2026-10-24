@@ -31,6 +31,7 @@
     "cmd-ts": "^0.13.0",
     "dotenv": "^16.4.5",
     "inquirer": "^8.2.2",
+    "picocolors": "^1.1.1",
     "puppeteer": "^22.8.0",
     "sanitize-filename": "^1.6.3"
   },

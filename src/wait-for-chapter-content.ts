@@ -1,3 +1,4 @@
+import { log } from './ui/log';
 import { Page } from 'puppeteer';
 import { delay } from './util/promise';
 import { waitForContentStable } from './content-probe';
@@ -24,7 +25,7 @@ export async function waitForChapterContent(
     const loaded = await waitForLaunchChapterContent(page);
     if (!loaded) {
       const chapter = new URL(checkUrl).searchParams.get('_chapter');
-      console.warn(
+      log.warn(
         `  · advertencia: contenido no detectado para ${
           chapter ?? 'capítulo'
         }, capturando de todas formas`
@@ -309,7 +310,7 @@ export async function restoreLaunchCurriculumPage(
   target.searchParams.delete('view');
   target.searchParams.delete('_chapter');
 
-  console.log('Restaurando vista del curso antes de guardar capítulos…');
+  log.detail('Restaurando vista del curso antes de guardar capítulos…');
   await page.goto(target.toString(), {
     waitUntil: 'domcontentloaded',
     timeout: 90_000,

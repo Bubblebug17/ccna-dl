@@ -127,6 +127,10 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--retries N` | **3** | Reintentos con espera creciente (recursos y capítulos fallidos; los reintentos de capítulo se limitan a 2 extra). |
 | `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png` (vista del curso tras el login). |
 | `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). |
+| `--verbose`, `-v N` | **2** | Verbosidad `1`-`3`. **1**: barras, avisos (`⚠`), errores (`✖`), capítulos parciales/fallidos y resumen final. **2**: además, el logo, los pasos principales (alumno, curso, capítulos encontrados) y una línea por capítulo guardado. **3**: además, login paso a paso, URLs, capítulos omitidos o que se rehacen y por qué, reintentos, reciclado/reinicio de pestañas y (sin terminal) una línea `[memoria]` cada 30 s. Los avisos y errores se ven siempre; las opciones `--debug-*` funcionan igual en cualquier nivel. |
+| `--no-banner` | desactivado | No imprime el logo ASCII (con `-v 1` tampoco se imprime). |
+| `--no-color` | desactivado | Sin colores ANSI. Los colores también se apagan con `NO_COLOR=1`, `TERM=dumb` o si la salida no es una terminal; `FORCE_COLOR=1` los fuerza. |
+| `--no-progress` | desactivado | Sin barras ni spinners: solo líneas (es automático si la salida no es una terminal). |
 | `--validate` | desactivado | Valida **offline** las descargas de `--out-dir` y escribe `validation-report.md`. No descarga ni inicia sesión. |
 | `--help`, `-h` | — | Ayuda. |
 
@@ -216,8 +220,17 @@ Una sola ejecución (un solo login) basta para varios capítulos o módulos: no 
 
 ### 5.3 Qué verás en consola
 
-- Mensajes de login, título del curso y número de capítulos encontrados.
-- Una **barra de progreso** (cli-progress) y una línea por capítulo con su resultado y tiempo, por ejemplo `[1/1] 1.0 · ✔ guardado con avisos (49 recursos, 18s)`.
+- El **logo** `ccna-dl` en ASCII (colores cian/azul/magenta; solo caracteres ASCII, se ve bien en PowerShell y cmd).
+- Mensajes de login, título del curso y número de capítulos encontrados (el detalle depende de `-v`).
+- La **pantalla de carga** (cli-progress `MultiBar`, refresco cada 125 ms):
+  - barra total con capítulos hechos, %, tiempo transcurrido y ETA;
+  - **indicador de memoria** (`src/ui/resource-monitor.ts`): RSS de Node + suma de memoria del árbol de procesos del Chrome lanzado por puppeteer (a partir de `browser.process().pid`), RAM libre y pico. En Windows lo mide **un solo** PowerShell en segundo plano con `Get-CimInstance Win32_Process` (no usa `wmic`, que ya no viene en Windows 11) cada 2 s; en Linux/macOS, `ps`. En Windows es *working set*, que cuenta dos veces la memoria compartida entre procesos de Chrome, así que es una cota alta. Amarillo con < 1,5 GB libres, rojo con < 700 MB;
+  - **una barra con spinner por pestaña**: capítulo en curso, fase (`abriendo` → `esperando contenido` → `vídeos` → `animaciones` → `recursos (N)` → `escribiendo HTML`; también `reintento N` y `2ª captura`) y segundos que lleva.
+  - Mientras hay barras, cualquier `console.log` se escribe por encima de ellas sin romperlas.
+  - En la consola clásica de Windows el spinner es `| / - \`; en Windows Terminal, VS Code, Linux y macOS usa caracteres braille.
+- Una línea por capítulo con su resultado y tiempo, coloreada (verde `✔`, amarillo `⚠`, rojo `✖`), por ejemplo `[1/1] 1.0 · ✔ guardado con avisos (49 recursos, 18s)`.
+- Al terminar, la memoria pico (Node + Chrome).
+- Sin terminal (redirección a archivo, CI) o con `--no-progress`: sin barras ni colores, solo líneas.
 - Al final, un **resumen**: capítulos guardados / omitidos / parciales / fallidos, duración total y, con paralelismo, la ganancia estimada (`ganancia ×N`).
 
 ### 5.4 Ctrl+C
@@ -331,7 +344,11 @@ flowchart TD
 | `memory.ts` | Reciclado (heap por `page.metrics()`, RAM libre) y plan de pestañas según la RAM libre. |
 | `verify-chapter.ts` | Verificación de un capítulo guardado (formato, texto, loaders, referencias locales, marca de incompleto). |
 | `run-summary.ts` | Lectura/escritura de `descarga-resumen.json` y `descarga-fallos.json`. |
-| `progress.ts` | Barra de progreso (cli-progress) con líneas por capítulo. |
+| `progress.ts` | Pantalla de carga: barra total, indicador de RAM y una barra con spinner por pestaña (cli-progress); degrada a líneas sin terminal. |
+| `ui/banner.ts` | Logo ASCII. |
+| `ui/colors.ts` | Colores (picocolors) con detección de `NO_COLOR`/`FORCE_COLOR`/TTY. |
+| `ui/log.ts` | Niveles de verbosidad (`-v 1-3`) y salida por encima de las barras. |
+| `ui/resource-monitor.ts` | Medición de RAM de Node + Chrome cada ~2 s (PowerShell/CIM en Windows, `ps` en Linux/macOS). |
 | `url-to-chapter-id.ts` | Obtiene el número de capítulo de una URL (parámetro `_chapter` o patrón `N.N`). |
 | `config/env.ts` | Carga de `.env` (`dotenv`) y tipado de `PASSWORD` / `NODE_ENV`. |
 | `util/retry.ts` | `withRetry`, `backoffMs`, `mapPool`, `waitUntil`, `fmtDuration`. |

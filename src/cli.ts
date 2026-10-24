@@ -51,6 +51,10 @@ import { DEBUG_DIR } from './save-chapter-html';
 import { removedFlagErrors } from './removed-flags';
 import { login } from './login';
 import { buildLaunchUrl, getChapterUrls } from './get-chapters';
+import { log, setVerbosity, verbosity } from './ui/log';
+import { printBanner } from './ui/banner';
+import { c } from './ui/colors';
+import { fmtMb, memText, monitor } from './ui/resource-monitor';
 
 const { version } = JSON.parse(
   readFileSync(join(__dirname, '../package.json')).toString()
@@ -185,30 +189,53 @@ const cmd = command({
       long: 'debug-screenshot',
       description: 'Depuración: guarda <curso>/debug/course.png (captura de la vista del curso tras el login).',
     }),
+    verbose: option({
+      long: 'verbose',
+      short: 'v',
+      type: number,
+      defaultValue: () => 2,
+      description:
+        'Nivel de detalle de la salida (1-3): 1 = mínimo (barras, avisos, errores y resumen), 2 = normal (por defecto; resultado de cada capítulo), ' +
+        '3 = detallado (login paso a paso, reintentos, omitidos, reciclado de pestañas, línea de memoria).',
+    }),
+    noBanner: flag({
+      long: 'no-banner',
+      description: 'No muestra el logo ASCII al iniciar.',
+    }),
+    noColor: flag({
+      long: 'no-color',
+      description: 'Sin colores (también con la variable de entorno NO_COLOR=1 o al redirigir la salida a un archivo).',
+    }),
+    noProgress: flag({
+      long: 'no-progress',
+      description: 'Sin barras ni spinners: solo líneas de texto (útil en logs; se hace solo si la salida no es una terminal).',
+    }),
     debugHeadful: flag({
       long: 'debug-headful',
       description: 'Depuración: abre el navegador con ventana visible para ver lo que hace.',
     }),
   },
   handler: async (args) => {
+    setVerbosity(args.verbose);
+    if (!args.noBanner && verbosity() >= 2) printBanner(version);
     if (args.validate) {
       process.exitCode = runValidator(args.outDir);
       return;
     }
     if (!args.user) {
-      console.error('Falta --user (tu correo/usuario de Netacad).');
+      log.error('Falta --user (tu correo/usuario de Netacad).');
       process.exitCode = 2;
       return;
     }
     const user: string = args.user;
 
     if (args.urls.length < 1) {
-      console.error('Please specify at least one url leading to a course.');
+      log.error('Please specify at least one url leading to a course.');
       return;
     }
     const notLaunch = args.urls.filter((u) => !/\/launch\b/.test(u));
     if (notLaunch.length) {
-      console.error(
+      log.error(
         `Solo se admiten cursos "launch" (https://www.netacad.com/.../launch?id=…). La interfaz clásica (descarga a PDF) ya no existe y se quitó: ${notLaunch.join(', ')}`
       );
       process.exitCode = 2;
@@ -227,7 +254,7 @@ const cmd = command({
             type: 'password',
           })
         ).password;
-      console.log('');
+      if (process.stdout.isTTY) console.log('');
     }
 
     let onlySpec: OnlySpec | undefined;
@@ -235,7 +262,7 @@ const cmd = command({
       try {
         onlySpec = parseOnly(args.only);
       } catch (e) {
-        console.error(e instanceof Error ? e.message : String(e));
+        log.error(e instanceof Error ? e.message : String(e));
         process.exitCode = 2;
         return;
       }
@@ -252,13 +279,13 @@ const cmd = command({
     ];
     // pestañas en paralelo: por defecto min(2, las que caben en la RAM libre); entre 1 y 6
     if (args.concurrency !== undefined && Math.floor(args.concurrency) > 6) {
-      console.warn(`--concurrency ${Math.floor(args.concurrency)} es demasiado alto para el modo HTML; se limita a 6 pestañas (Netacad puede limitar o bloquear muchas pestañas a la vez).`);
+      log.warn(`--concurrency ${Math.floor(args.concurrency)} es demasiado alto para el modo HTML; se limita a 6 pestañas (Netacad puede limitar o bloquear muchas pestañas a la vez).`);
     }
     const plan = planTabs(args.concurrency);
     const tabs = plan.tabs;
-    if (plan.warn) console.warn(plan.warn);
+    if (plan.warn) log.warn(plan.warn);
     else if (plan.auto) {
-      console.log(`Pestañas en paralelo: ${tabs} (automático; RAM libre ~${(plan.freeMb / 1024).toFixed(1)} GB de ${(plan.totalMb / 1024).toFixed(1)} GB). Cambia con --concurrency.`);
+      log.info(`Pestañas en paralelo: ${tabs} (automático; RAM libre ~${(plan.freeMb / 1024).toFixed(1)} GB de ${(plan.totalMb / 1024).toFixed(1)} GB). Cambia con --concurrency.`);
     }
 
     const browser = await puppeteer.launch({
@@ -269,6 +296,8 @@ const cmd = command({
         ...chromeLaunchArgs({ headful: args.debugHeadful }),
       ],
     });
+    // indicador de memoria: Node + árbol de procesos del Chrome de puppeteer, cada ~2 s
+    monitor.start(browser.process()?.pid);
 
     try {
       for (const url of args.urls) {
@@ -282,13 +311,13 @@ const cmd = command({
           await sessionPage.goto('https://www.netacad.com', {
             waitUntil: 'networkidle2',
           });
-          console.log('Going to Netacad.com');
+          log.detail('Going to Netacad.com');
           await waitForSpinners(sessionPage);
           const LoginButton = await sessionPage.$('#netacad-login-button');
 
           if (LoginButton) {
-            console.log('Login Button Found');
-            console.log('Requesting Login Page');
+            log.detail('Login Button Found');
+            log.detail('Requesting Login Page');
             await LoginButton.click();
             // en cuanto aparece el formulario seguimos (máx. 3 s, igual que antes)
             await waitUntil(async () => !!(await sessionPage.$('input[name="username"]')), 3000, 150);
@@ -301,11 +330,11 @@ const cmd = command({
           const studentName = profileEl
             ? await profileEl.evaluate((el) => el.textContent?.trim() ?? '')
             : null;
-          console.log('Student Name: ' + studentName);
-          console.log('Going to Course Page');
-          console.log(url);
+          log.step('Student Name: ' + studentName);
+          log.detail('Going to Course Page');
+          log.detail(url);
           await sessionPage.goto(url, { waitUntil: 'networkidle2' });
-          console.log('Course Page Loaded');
+          log.detail('Course Page Loaded');
           await waitUntil(
             async () =>
               !!(await sessionPage.$(
@@ -317,7 +346,7 @@ const cmd = command({
           await dismissCookieBanner(sessionPage);
 
           if (/\/launch\b/.test(url) && !/\/launch\b/.test(sessionPage.url())) {
-            console.log('La página salió del curso, volviendo a abrirlo…');
+            log.info('La página salió del curso, volviendo a abrirlo…');
             await sessionPage.goto(url, { waitUntil: 'networkidle2' });
             await waitUntil(
               async () => !!(await sessionPage.$('#course-outline, [class*="nodeList"], iframe')),
@@ -327,7 +356,7 @@ const cmd = command({
           }
 
           courseTitle = await getCourseTitle(sessionPage);
-          console.log('Course Title: ' + courseTitle);
+          log.step('Course Title: ' + courseTitle);
           const isLaunchUrl = /\/launch\b/.test(url);
           const courseIdEarly = courseIdOf(url);
           const siteDir = courseIdEarly ? courseSiteDir(args.outDir, courseIdEarly, courseTitle) : undefined;
@@ -345,7 +374,7 @@ const cmd = command({
               const base = sessionPage.url();
               urls = hit.map((e) => buildLaunchUrl(base, e.viewId, e.chapter));
               fromCache = true;
-              console.log(
+              log.info(
                 `--only ${onlySpec.text}: ${urls.length} capítulo(s) tomados de ${OUTLINE_CACHE_FILE} (${cache.savedAt.slice(0, 10)}); no se escanea el outline. Usa --refresh-outline para volver a leerlo.`
               );
             }
@@ -353,7 +382,7 @@ const cmd = command({
           if (!fromCache) {
             const tScan = Date.now();
             urls = await getChapterUrls(sessionPage, { only: args.only });
-            if (!args.only) console.log(`Outline completo leído en ${((Date.now() - tScan) / 1000).toFixed(0)} s.`);
+            if (!args.only) log.info(`Outline completo leído en ${((Date.now() - tScan) / 1000).toFixed(0)} s.`);
             if (isLaunchUrl && courseIdEarly && siteDir && urls.length > 0) {
               try {
                 const prev = await readOutlineCache(siteDir, courseIdEarly);
@@ -365,16 +394,16 @@ const cmd = command({
                 });
                 await writeOutlineCache(siteDir, cacheNow);
               } catch (e) {
-                console.warn(`No se pudo guardar ${OUTLINE_CACHE_FILE}: ${e instanceof Error ? e.message : e}`);
+                log.warn(`No se pudo guardar ${OUTLINE_CACHE_FILE}: ${e instanceof Error ? e.message : e}`);
               }
             }
           }
           if (args.only) {
-            console.log(`--only ${args.only} → ${urls.length} capítulo(s): ${urls.map((u) => chapterIdFromUrl(u)).join(', ') || '(ninguno)'}`);
+            log.info(`--only ${args.only} → ${urls.length} capítulo(s): ${urls.map((u) => chapterIdFromUrl(u)).join(', ') || '(ninguno)'}`);
           }
 
           if (urls.length === 0) {
-            console.error(
+            log.error(
               args.only
                 ? `No se encontró ningún capítulo para --only "${args.only}" en el outline.`
                 : 'No hay URLs de capítulo para descargar.'
@@ -384,7 +413,7 @@ const cmd = command({
             continue;
           }
         } catch (e) {
-          console.error(`Error en el curso ${url}:`, e);
+          log.error(`Error en el curso ${url}:`, e);
           await sessionPage.close().catch(() => undefined);
           process.exitCode = 1;
           continue; // antes: return (abortaba también los demás cursos)
@@ -413,7 +442,7 @@ const cmd = command({
           const onSigint = () => {
             sigints++;
             if (sigints === 1) {
-              console.log(
+              log.info(
                 '\nCtrl+C: se terminan los capítulos en curso y se guardan índice y resumen… (Ctrl+C otra vez para salir ya)'
               );
               abort.abort();
@@ -438,7 +467,7 @@ const cmd = command({
               newPage: newWorkerPage,
               chapterTimeoutMs: Math.max(10, args.chapterTimeout) * 1000,
               signal: abort.signal,
-              progressBar: true,
+              progressBar: !args.noProgress,
               prepareScrolls: true,
               prepareChapter: async (p, chapterUrl) => {
                 await gotoChapter(p, chapterUrl);
@@ -462,12 +491,16 @@ const cmd = command({
           continue;
         }
 
-        console.error(`No es un curso "launch" (HTML offline): ${url}. La interfaz clásica de Netacad (descarga a PDF) ya no existe y se quitó.`);
+        log.error(`No es un curso "launch" (HTML offline): ${url}. La interfaz clásica de Netacad (descarga a PDF) ya no existe y se quitó.`);
         await sessionPage.close().catch(() => undefined);
         process.exitCode = 1;
       }
     } finally {
+      const peak = monitor.peak();
+      const last = monitor.sample();
+      monitor.stop();
       await browser?.close();
+      if (peak > 0) log.info(c.dim(`Memoria: pico ${fmtMb(peak)} (Node + Chrome) · al final ${memText(last)}`));
     }
   },
 });
@@ -486,11 +519,11 @@ function courseIdOf(url: string): string | undefined {
 function runValidator(outDir: string): number {
   const script = join(__dirname, '..', 'scripts', 'validate-download.js');
   if (!existsSync(script)) {
-    console.error(`No se encontró el validador: ${script}`);
+    log.error(`No se encontró el validador: ${script}`);
     return 2;
   }
   const root = resolvePath(outDir);
-  console.log(`Validando descargas en ${root} (sin conexión)…`);
+  log.info(`Validando descargas en ${root} (sin conexión)…`);
   const r = spawnSync(process.execPath, [script, '--root', root], { stdio: 'inherit' });
   return r.status ?? 2;
 }
@@ -552,5 +585,6 @@ if (removed.length) {
   for (const m of removed) console.error(m);
   process.exitCode = 2;
 } else {
+  if ((argv.includes('--help') || argv.includes('-h')) && !argv.includes('--no-banner')) printBanner(version);
   run(cmd, argv);
 }
