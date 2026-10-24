@@ -1,65 +1,166 @@
 # ccna-dl
 
-A simple tool for downloading your CCNA course from the website.
+Descarga cursos de [Netacad](https://www.netacad.com/) de tipo **launch** como **HTML offline**, para leerlos sin conexión desde el navegador.
 
-## OUT OF DATE
+Es un fork de [garzj/ccna-dl](https://github.com/garzj/ccna-dl). El original descargaba la interfaz clásica de Netacad, que ya no existe. Esta versión está reescrita para los cursos actuales.
 
-This downloader seems to be broken by now ([#1](/../../issues/1)). I won't fix it, but would accept PRs or transfer the npm package.
+## Qué hace
 
-## Features
+- Guarda cada capítulo como un HTML autónomo y crea un `index.html` con enlaces a todos.
+- Descarga los recursos (CSS, fuentes, imágenes y archivos) una sola vez y los reutiliza entre capítulos.
+- **Vídeos:** activa cada reproductor y descarga el vídeo (mp4, o HLS/DASH convertido con ffmpeg) junto con su póster y subtítulos.
+- **Animaciones interactivas** (`<adobe-animate-view>`, p. ej. 2.3.2): pulsa «play» y graba cada una en un `.webm` local.
+- **Pestañas, carruseles y gráficos dinámicos:** los guarda con su contenido y estilos.
+- Descarga varios capítulos en paralelo (pestañas del mismo navegador), reanuda descargas y reintenta lo que falla.
+- Verifica cada capítulo después de guardarlo y lo vuelve a capturar si quedó incompleto.
 
-- download the whole course contents
-- clicks through carousels and stacks their contents
-- videos and interactive animations (`<adobe-animate-view>`, e.g. 2.3.2 "OSPF designated router") are recorded so that they play offline (see `--no-videos`, `--no-animations`, `--debug-network` and [DOCUMENTACION.md](./DOCUMENTACION.md) §7.6)
+## Requisitos
 
-## Run this tool
+- **Node.js** 20 o 22. Los scripts de `scripts/` funcionan con Node ≥ 16.
+- **Cuenta de Netacad** con acceso al curso.
+- **Chrome:** Puppeteer descarga el suyo al hacer `npm install`.
+- **ffmpeg** (opcional): solo hace falta para los vídeos en streaming (`.m3u8`/`.mpd`). Tiene que estar en el `PATH` o indicarse con `FFMPEG_PATH`.
 
-- Install [Node.js + npm](https://nodejs.org/)
-- `npx ccna-dl --help`
+## Instalación
 
-## Usage
+```powershell
+git clone https://github.com/Bubblebug17/ccna-dl.git
+cd ccna-dl
+npm install
+npm run build          # compila src/ → lib/
+node lib/cli.js --help
+```
 
-- Head to [netacad.com](netacad.com)
-- Launch your course
-- Copy the link that leads to the course contents (not the link in the address bar):  
-  <img src="./img/copy-link-example.png" width="30%">
-- `npx ccna-dl -u <YOUR_EMAIL> <COURSE_URL>`
-- Only part of the course (no full outline sync, one login): `--only 2` (whole module), `--only 2.3`,
-  `--only 2.1,2.3,5`, `--only 2.1-2.4`. Combine with `--force` to redo just those chapters; the index and
-  `descarga-resumen.json` are merged, the rest of the course is not touched. `--refresh-outline` ignores the
-  cached outline (`outline-cache.json`). Details in [DOCUMENTACION.md](./DOCUMENTACION.md) §5.5.
+Cada vez que cambies algo en `src/`, vuelve a ejecutar `npm run build`.
 
-## Velocidad, paralelismo y esperas (modo HTML offline)
+## Configuración
 
-Node es de un solo hilo, pero casi todo el tiempo de la descarga se va **esperando al sitio** (cargas, efectos de 1–2 s,
-descarga de recursos). Por eso la descarga en paralelo usa **varias pestañas del mismo navegador y sesión**, no hilos.
+```powershell
+Copy-Item .env.example .env
+```
 
-| Opción | Por defecto | Qué hace |
-| --- | --- | --- |
-| `--concurrency N` | `2` (o menos si hay poca RAM libre; máx. 6) | Capítulos que se descargan a la vez (pestañas en paralelo). `1` = secuencial como antes. Cada pestaña puede usar ~1 GB de RAM; si `N` no cabe en la RAM libre se avisa. |
-| `--recycle-every N` | `8` | Cada `N` capítulos se cierra y reabre la pestaña de cada worker para liberar la memoria de Chrome (`0` = nunca). También se recicla antes si el heap de JS pasa de ~600 MB o queda poca RAM libre. |
-| `--no-videos` | desactivado | No intenta capturar los vídeos (se queda el póster, como antes). Los capítulos guardados así se marcan con formato 2 y no se rehacen por tener vídeos pendientes. |
-| `--no-animations` | desactivado | No pulsa «play» en las animaciones interactivas (`<adobe-animate-view>`: canvas pintado por JS) ni las graba. Sin esto se graba cada animación como vídeo `.webm` local (hasta 90 s por animación) y el capítulo se repite al reanudar si la animación quedó sin grabar. |
-| *(automático)* | — | Los gráficos dinámicos anidados en pestañas (p. ej. 1.3.3) se guardan con sus hojas de estilo aplicadas; los capítulos descargados con una versión anterior se detectan y se repiten al reanudar o con `--force --only X.Y`. |
-| `--debug-network` | desactivado | Depuración: escribe `<curso>/debug/red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red vistas al activarlos (**sin cookies, cabeceras ni valores de query**: solo los nombres de los parámetros). |
-| `--min-wait ms` | `1500` | Espera mínima de asentamiento, **además** de las condiciones (sin spinner/esqueleto, DOM estable, imágenes y red en reposo). Súbela (p. ej. `2500`) si tu conexión es lenta. |
-| `--chapter-timeout s` | `300` | Tiempo máximo por intento de capítulo; al agotarse se reinicia la pestaña y se reintenta. |
-| `--fast` | desactivado | Modo agresivo (opt-in): esperas mínimas más cortas y bloquea también `adobedtm`. |
-| `--no-block-trackers` | bloqueo activo | No bloquear analíticas/publicidad (por defecto no se cargan; no afectan al contenido). |
-| `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png`. |
-| `--debug-headful` | desactivado | Depuración: navegador con ventana visible. |
+Escribe tu contraseña de Netacad en `PASSWORD=`. Si la dejas vacía, el programa te la pide por consola. El archivo `.env` está en `.gitignore`: no lo compartas.
 
-Opciones renombradas (dan error con el nombre nuevo): `--dump-network` → `--debug-network`, `--screenshot` → `--debug-screenshot`, `--headful` → `--debug-headful`. Quitadas: `--format`, `--timeout`/`-t` (modo PDF de la interfaz clásica, que ya no existe) y `--block-media` (lo hace `--no-videos`). Solo se admiten cursos `launch`.
+## Cómo obtener la URL del curso
 
-- **Vídeos**: el programa pulsa «play» en cada reproductor, lee la fuente real (mp4 firmado o HLS/DASH), la descarga y la sustituye por un `<video controls>` local con póster y subtítulos (`.vtt` incrustado). Los vídeos en *streaming* (`.m3u8`/`.mpd`) necesitan **ffmpeg** instalado (o `FFMPEG_PATH`). No verificado con Netacad real; ver `DOCUMENTACION.md` §12.
-- **Capítulos/subtemas inexistentes**: las IP del texto (`10.1.0.0/16`) ya no se toman por subtemas, y los cuestionarios `X.Y.1` ya no pisan la sección `X.Y`. Para limpiar descargas anteriores: `node scripts/clean-fake-chapters.js` (simulación) y `--apply`.
-- **Captura segura**: cada página espera por condición, se verifica tras guardar (spinner/esqueleto/imágenes pendientes) y, si la carga no había terminado, se
-  re-captura automáticamente una vez; si aun así queda incompleta se marca `parcial` y al reanudar se rehace.
-- **Ctrl+C**: la primera vez termina de escribir los capítulos en curso (escritura atómica) y para; vuelve a ejecutar **el mismo comando** para continuar (se omiten los ya verificados).
-- Los recursos compartidos entre capítulos (CSS, fuentes, imágenes comunes) se descargan **una sola vez**.
-- **Memoria**: Chrome es lo que más RAM gasta. En un PC con ~16 GB usa `--concurrency 2` (por defecto) y no lo subas si el equipo ya va justo; con poca RAM libre usa `--concurrency 1`. Si ves un `Memoria: …` de aviso al arrancar, hazle caso. Más detalle en `DOCUMENTACION.md` (§11).
-- Si Netacad devuelve errores o "Sesión no válida", baja a `1`–`2`.
+1. Entra en netacad.com y abre tu curso.
+2. Copia el enlace que lleva al contenido del curso (`https://www.netacad.com/<idioma>/launch?id=...`), no el de la barra de direcciones:
 
-## Disclaimer
+   <img src="./img/copy-link-example.png" width="30%">
 
-This project is only for educational purposes. Don't download stuff with this tool please.
+## Uso
+
+Pon siempre la URL **entre comillas**: en PowerShell, `&` y `?` tienen significado especial.
+
+```powershell
+# Curso completo
+node lib/cli.js --user tu@correo.com --out-dir D:\cursos "https://www.netacad.com/es/launch?id=<id>"
+
+# Solo una parte: módulo, capítulo, lista o rango
+node lib/cli.js -u tu@correo.com --only 2 "<url>"
+node lib/cli.js -u tu@correo.com --only 2.3 "<url>"
+node lib/cli.js -u tu@correo.com --only 2.1,2.3 "<url>"
+node lib/cli.js -u tu@correo.com --only 2.1-2.4 "<url>"
+
+# Rehacer capítulos ya descargados
+node lib/cli.js -u tu@correo.com --only 2.3 --force "<url>"
+
+# Reintentar solo lo que falló en la ejecución anterior
+node lib/cli.js -u tu@correo.com --retry-failed "<url>"
+
+# Menos memoria o más paralelismo
+node lib/cli.js -u tu@correo.com --concurrency 1 --recycle-every 4 "<url>"
+
+# Más rápido y ligero: sin vídeos ni animaciones
+node lib/cli.js -u tu@correo.com --no-videos --no-animations "<url>"
+
+# Volver a leer el índice del curso (ignora outline-cache.json)
+node lib/cli.js -u tu@correo.com --only 3 --refresh-outline "<url>"
+
+# Validar las descargas sin conexión (no inicia sesión)
+node lib/cli.js --validate --out-dir D:\cursos
+```
+
+Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y se continúa con lo que falta. Con **Ctrl+C**, el programa termina de escribir los capítulos en curso y se detiene; para seguir, vuelve a ejecutar el mismo comando.
+
+## Opciones
+
+| Opción | Por defecto | Descripción |
+|---|---|---|
+| `<urls…>` | — | Una o más URLs de cursos launch. |
+| `-u`, `--user` | — | Correo o usuario de Netacad (no hace falta con `--validate`). |
+| `-o`, `--out-dir` | `.` | Carpeta donde se guardan los cursos. |
+| `-c`, `--concurrency` | `2` | Capítulos a la vez (pestañas), máximo 6. Baja automáticamente si hay poca RAM libre. Cada pestaña puede usar ~1 GB. |
+| `--only` | — | Solo parte del curso: `2`, `2.3`, `2.1,2.3,5`, `2.1-2.4`, `2-4`. El índice y el resumen se mezclan con lo ya descargado. |
+| `--force` | no | Vuelve a descargar aunque el capítulo ya exista y esté verificado. |
+| `--retry-failed` | no | Descarga solo los capítulos de `descarga-fallos.json`. |
+| `--refresh-outline` | no | Con `--only`: ignora `outline-cache.json` y vuelve a leer el índice del curso. |
+| `--validate` | no | Valida sin conexión las descargas de `--out-dir` y escribe `validation-report.md`. No descarga nada. |
+| `--recycle-every` | `8` | Cada cuántos capítulos se reabre cada pestaña para liberar memoria (`0` = nunca). |
+| `--no-videos` | no | No descarga vídeos (solo guarda el póster) y bloquea vídeo/audio. |
+| `--no-animations` | no | No graba las animaciones interactivas. |
+| `--min-wait` | `1500` | Milisegundos mínimos que el contenido debe estar cargado antes de guardarlo. Súbelo con conexiones lentas. |
+| `--chapter-timeout` | `300` | Segundos máximos por intento de capítulo. |
+| `--retries` | `3` | Reintentos para recursos y capítulos que fallan. |
+| `--asset-concurrency` | `6` | Recursos descargados a la vez por capítulo. |
+| `--fast` | no | Modo rápido y menos seguro: esperas más cortas y más bloqueos. |
+| `--no-block-trackers` | no | No bloquea analítica ni publicidad (por defecto se bloquean). |
+| `-h`, `--help` | — | Muestra la ayuda. |
+
+### Depuración
+
+Todo lo que generan estas opciones se guarda en `<curso>/debug/`.
+
+| Opción | Descripción |
+|---|---|
+| `--debug-network` | Guarda `debug/red-<capítulo>.json` con las peticiones de red y las animaciones detectadas, sin cookies, cabeceras ni tokens. Úsala con `--only`. |
+| `--debug-screenshot` | Guarda `debug/course.png` con una captura de la vista del curso tras el login. |
+| `--debug-headful` | Abre el navegador con ventana visible. |
+
+Los nombres antiguos (`--dump-network`, `--screenshot`, `--headful`) terminan con un error que indica el nuevo. También se quitaron `--format`, `--timeout`/`-t` y `--block-media`.
+
+## Scripts
+
+```powershell
+# Validador offline (no modifica nada)
+node scripts/validate-download.js --root D:\cursos [--course <texto>] [--out informe.md] [--json informe.json]
+
+# Limpia subtemas falsos y capítulos pisados por cuestionarios en descargas antiguas
+node scripts/clean-fake-chapters.js --root D:\cursos            # simulación (--dry-run, por defecto)
+node scripts/clean-fake-chapters.js --root D:\cursos --apply    # aplica y guarda copia en <curso>/.limpieza-*/
+```
+
+## Carpeta de salida
+
+```
+<out-dir>/
+└── <id>_<Título del curso>/
+    ├── index.html               # índice con enlaces a los capítulos
+    ├── chapters/1.0.html …      # un HTML por capítulo
+    ├── assets/                  # css, fonts, img, video, files
+    ├── descarga-resumen.json    # resultado de la última ejecución
+    ├── descarga-fallos.json     # pendientes para --retry-failed
+    ├── outline-cache.json       # caché del índice del curso para --only
+    └── debug/                   # solo con opciones --debug-*
+```
+
+## Problemas comunes
+
+| Problema | Solución |
+|---|---|
+| Error de URL o «no es un curso launch» | Revisa la URL (p. ej. `ttps://` sin la `h`), usa el enlace `.../launch?id=...` y ponlo entre comillas. |
+| Poca RAM o el PC va lento | `--concurrency 1`, y si hace falta `--recycle-every 4`. |
+| «Sesión no válida» o errores de Netacad | Baja `--concurrency` a 1 y vuelve a ejecutar el mismo comando. |
+| Recursos con 404 en el resumen | Suelen ser archivos que faltan en el propio curso de Netacad. El capítulo se guarda igual. |
+| Los vídeos en streaming no se descargan | Instala ffmpeg o indica su ruta en `FFMPEG_PATH`. |
+| Algún capítulo queda `parcial`/`fallido` | Usa `--retry-failed`, o `--only X.Y --force`. Si tu conexión es lenta, sube `--min-wait`. |
+
+## Más información
+
+[DOCUMENTACION.md](./DOCUMENTACION.md) explica el funcionamiento interno, la validación, las pruebas (`npm test`), los resultados y el historial de cambios.
+
+## Créditos y licencia
+
+Fork de [garzj/ccna-dl](https://github.com/garzj/ccna-dl). Licencia **GPL-3.0** (ver [LICENSE](./LICENSE)).
+
+Uso solo educativo y personal: descarga únicamente los cursos a los que tienes acceso y no redistribuyas su contenido.
