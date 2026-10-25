@@ -104,14 +104,14 @@ const cmd = command({
       long: 'only',
       type: optional(string),
       description:
-        'Descarga solo parte del curso SIN sincronizar el curso entero (solo se lee el outline de esos módulos; una sola sesión). ' +
+        'Descarga solo parte del curso SIN sincronizar el curso entero (solo se lee esa parte del índice del curso; una sola sesión). ' +
         'Acepta un capítulo (--only 2.3), un módulo entero (--only 2), varios separados por coma (--only 2.1,2.3,5) y rangos (--only 2.1-2.4, --only 2-4). ' +
         'El índice y el resumen se mezclan con lo ya existente (el resto del curso no se toca). Combínalo con --force para rehacer solo lo pedido.',
     }),
     refreshOutline: flag({
       long: 'refresh-outline',
       description:
-        'Con --only: ignora outline-cache.json y vuelve a leer el outline del curso (por defecto, si la caché del curso ya tiene lo pedido, no se escanea).',
+        'Con --only: ignora outline-cache.json y vuelve a leer el índice del curso (por defecto, si la caché del curso ya tiene lo pedido, no se escanea).',
     }),
     validate: flag({
       long: 'validate',
@@ -259,7 +259,6 @@ const cmd = command({
             type: 'password',
           })
         ).password;
-      if (process.stdout.isTTY) console.log('');
     }
 
     let onlySpec: OnlySpec | undefined;
@@ -311,7 +310,7 @@ const cmd = command({
     const tabs = plan.tabs;
     if (plan.warn) log.warn(plan.warn);
     else if (plan.auto) {
-      log.info(`Pestañas en paralelo: ${tabs} (automático; RAM libre ~${(plan.freeMb / 1024).toFixed(1)} GB de ${(plan.totalMb / 1024).toFixed(1)} GB). Cambia con --concurrency.`);
+      log.info(`Subcapítulos en paralelo: ${tabs} (automático; RAM libre ~${(plan.freeMb / 1024).toFixed(1)} GB de ${(plan.totalMb / 1024).toFixed(1)} GB). Cambia con --concurrency.`);
     }
 
     const browser = await puppeteer.launch({
@@ -360,7 +359,7 @@ const cmd = command({
           const studentName = profileEl
             ? await profileEl.evaluate((el) => el.textContent?.trim() ?? '')
             : null;
-          log.step('Student Name: ' + studentName);
+          log.step('Estudiante: ' + studentName);
           log.detail('Going to Course Page');
           log.detail(url);
           await sessionPage.goto(url, { waitUntil: 'networkidle2' });
@@ -386,7 +385,7 @@ const cmd = command({
           }
 
           courseTitle = await getCourseTitle(sessionPage);
-          log.step('Course Title: ' + courseTitle);
+          log.step('Curso: ' + courseTitle);
           const isLaunchUrl = /\/launch\b/.test(url);
           const courseIdEarly = courseIdOf(url);
           const siteDir = courseIdEarly ? courseSiteDir(args.outDir, courseIdEarly, courseTitle) : undefined;
@@ -405,14 +404,14 @@ const cmd = command({
               urls = hit.map((e) => buildLaunchUrl(base, e.viewId, e.chapter));
               fromCache = true;
               log.info(
-                `--only ${onlySpec.text}: ${urls.length} capítulo(s) tomados de ${OUTLINE_CACHE_FILE} (${cache.savedAt.slice(0, 10)}); no se escanea el outline. Usa --refresh-outline para volver a leerlo.`
+                `--only ${onlySpec.text}: ${urls.length} subcapítulo(s) tomados de ${OUTLINE_CACHE_FILE} (${cache.savedAt.slice(0, 10)}); no se vuelve a leer el índice del curso. Usa --refresh-outline para volver a leerlo.`
               );
             }
           }
           if (!fromCache) {
             const tScan = Date.now();
             urls = await getChapterUrls(sessionPage, { only: args.only });
-            if (!args.only) log.info(`Outline completo leído en ${((Date.now() - tScan) / 1000).toFixed(0)} s.`);
+            if (!args.only) log.info(`Índice del curso leído en ${((Date.now() - tScan) / 1000).toFixed(0)} s.`);
             if (isLaunchUrl && courseIdEarly && siteDir && urls.length > 0) {
               try {
                 const prev = await readOutlineCache(siteDir, courseIdEarly);
@@ -429,13 +428,13 @@ const cmd = command({
             }
           }
           if (args.only) {
-            log.info(`--only ${args.only} → ${urls.length} capítulo(s): ${urls.map((u) => chapterIdFromUrl(u)).join(', ') || '(ninguno)'}`);
+            log.info(`--only ${args.only} → ${urls.length} subcapítulo(s): ${urls.map((u) => chapterIdFromUrl(u)).join(', ') || '(ninguno)'}`);
           }
 
           if (urls.length === 0) {
             log.error(
               args.only
-                ? `No se encontró ningún capítulo para --only "${args.only}" en el outline.`
+                ? `No se encontró ningún capítulo para --only "${args.only}" en el índice del curso.`
                 : 'No hay URLs de capítulo para descargar.'
             );
             await sessionPage.close();
@@ -612,7 +611,7 @@ async function getCourseTitle(page: Page): Promise<string> {
 const argv = process.argv.slice(2);
 const removed = removedFlagErrors(argv);
 if (removed.length) {
-  for (const m of removed) console.error(m);
+  for (const m of removed) log.error(m);
   process.exitCode = 2;
 } else {
   if ((argv.includes('--help') || argv.includes('-h')) && !argv.includes('--no-banner')) printBanner(version);
