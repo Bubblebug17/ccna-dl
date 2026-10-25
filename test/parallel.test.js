@@ -254,8 +254,9 @@ test('Ctrl+C: no se empiezan capítulos nuevos, nada queda a medias y se puede r
   const r1 = await run(urls, outDir, {
     concurrency: 2,
     signal: ac.signal,
-    log: (m) => {
-      if (/✔ guardado/.test(m)) ac.abort();
+    log: (m, _lvl, kind) => {
+      // primer subcapítulo terminado: "[OK] 1.0 Título (N recursos, 2s)" o un aviso de ese subcapítulo
+      if ((kind === 'ok' || kind === 'warn') && /^\d+(\.\d+)* /.test(m)) ac.abort();
     },
   });
   assert.strictEqual(r1.aborted, true);

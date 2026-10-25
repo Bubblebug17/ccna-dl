@@ -1041,6 +1041,8 @@ export type SaveChapterResult = {
   videos?: VideoCaptureResult;
   /** Resultado de la captura de animaciones (si estaba activada). */
   animations?: AnimationCaptureResult;
+  /** Recursos que no existen en el servidor (404/410, o 403 con la sesión válida): URL de cada uno. */
+  missingOnServer?: string[];
 };
 
 export type SaveChapterOptions = {
@@ -1298,14 +1300,14 @@ export async function saveChapterHtml(
   const missingOnServer: string[] = [];
   for (const [rel, why] of [...failed.entries()]) {
     if (/^HTTP (404|410)\b/.test(why) || (sessionOk && /^HTTP 403\b/.test(why))) {
-      missingOnServer.push(why.replace(/^HTTP \d+ \(?/, '').replace(/\)$/, '').slice(0, 140));
+      missingOnServer.push(why.replace(/^HTTP \d+ \(?/, '').replace(/\)$/, ''));
       failed.delete(rel);
     }
   }
   if (missingOnServer.length) {
     warnings.push(
       `${missingOnServer.length} recurso(s) no existen en el servidor (404/403, referencias rotas del curso; no se reintentan): ` +
-        [...new Set(missingOnServer)].slice(0, 2).join(' | ')
+        [...new Set(missingOnServer)].slice(0, 2).map((u) => u.slice(0, 140)).join(' | ')
     );
   }
   if (recaptured) {
@@ -1349,6 +1351,7 @@ export async function saveChapterHtml(
     recaptured,
     videos: wantVideos ? videoCapture : undefined,
     animations: wantAnimations ? animCapture : undefined,
+    missingOnServer: missingOnServer.length ? [...new Set(missingOnServer)] : undefined,
   };
 }
 

@@ -23,7 +23,7 @@
 
 ## 1. Qué es y para qué sirve
 
-`ccna-dl` abre Netacad con un navegador automatizado (Puppeteer + Chrome), inicia sesión con **tu propia cuenta**, recorre el índice (outline) de un curso y guarda **cada capítulo como un archivo HTML autónomo** junto con sus recursos (CSS, fuentes, imágenes, archivos). El resultado se puede abrir sin internet.
+`ccna-dl` abre Netacad con un navegador automatizado (Puppeteer + Chrome), inicia sesión con **tu propia cuenta**, recorre el índice de un curso y guarda **cada capítulo como un archivo HTML autónomo** junto con sus recursos (CSS, fuentes, imágenes, archivos). El resultado se puede abrir sin internet.
 
 - **Uso previsto:** personal y educativo, con tu propia cuenta de Netacad y para cursos en los que estás matriculado. No lo uses para redistribuir material (ver el *Disclaimer* del [README](README.md)).
 - Los cursos nuevos de Netacad ("launch") se guardan como **HTML offline**. Solo se admiten enlaces de tipo launch: el modo PDF de la interfaz clásica se quitó (esa interfaz ya no existe).
@@ -116,7 +116,7 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--debug-network` | desactivado | Depuración (§7.6): escribe `<curso>/debug/red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red de la activación, **sin cookies, cabeceras ni valores de query** (solo nombres de parámetros; los tramos de ruta que parecen tokens salen como `<token>`). |
 | `--out-dir`, `-o` | `.` (carpeta actual) | Carpeta donde se crea la carpeta del curso. |
 | `--only <expr>` | — | Descarga solo una parte del curso **sin sincronizar el curso entero** (§5.5). Acepta un capítulo (`--only 2.3`), un módulo entero (`--only 2`, incluye 2.0, 2.1…), una lista (`--only 2.1,2.3,5`) y rangos (`--only 2.1-2.4`, `--only 2-4`). |
-| `--refresh-outline` | desactivado | Con `--only`: ignora `outline-cache.json` y vuelve a leer el outline (§5.5). |
+| `--refresh-outline` | desactivado | Con `--only`: ignora `outline-cache.json` y vuelve a leer el índice del curso (§5.5). |
 | `--force` | desactivado | Vuelve a descargar todo aunque ya esté guardado y verificado. |
 | `--retry-failed` | desactivado | Descarga solo los capítulos de `descarga-fallos.json`. |
 | `--min-wait ms` | **1500** (500 con `--fast`) | Tiempo mínimo que el contenido debe llevar cargado antes de guardar, *además* de las esperas por condición. |
@@ -127,7 +127,7 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `--retries N` | **3** | Reintentos con espera creciente (recursos y capítulos fallidos; los reintentos de capítulo se limitan a 2 extra). |
 | `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png` (vista del curso tras el login). |
 | `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). |
-| `--verbose`, `-v N` | **2** | Verbosidad `1`-`3`. **1**: barras, avisos (`⚠`), errores (`✖`), capítulos parciales/fallidos y resumen final. **2**: además, el logo, los pasos principales (alumno, curso, capítulos encontrados) y una línea por capítulo guardado. **3**: además, login paso a paso, URLs, capítulos omitidos o que se rehacen y por qué, reintentos, reciclado/reinicio de pestañas y (sin terminal) una línea `[memoria]` cada 30 s. Los avisos y errores se ven siempre; las opciones `--debug-*` funcionan igual en cualquier nivel. |
+| `--verbose`, `-v N` | **2** | Verbosidad `1`-`3`. **1**: barras, avisos (`[WARN]`), errores (`[ERROR]`) y resumen final. **2**: además, el logo, los pasos principales (alumno, curso, capítulos encontrados) y una línea por capítulo guardado. **3**: además, login paso a paso, URLs, capítulos omitidos o que se rehacen y por qué, reintentos, reciclado/reinicio de pestañas y (sin terminal) una línea `[memoria]` cada 30 s. Los avisos y errores se ven siempre; las opciones `--debug-*` funcionan igual en cualquier nivel. |
 | `--no-banner` | desactivado | No imprime el logo ASCII (con `-v 1` tampoco se imprime). |
 | `--no-color` | desactivado | Sin colores ANSI. Los colores también se apagan con `NO_COLOR=1`, `TERM=dumb` o si la salida no es una terminal; `FORCE_COLOR=1` los fuerza. |
 | `--no-progress` | desactivado | Sin barras ni spinners: solo líneas (es automático si la salida no es una terminal). |
@@ -222,16 +222,21 @@ Una sola ejecución (un solo login) basta para varios capítulos o módulos: no 
 
 - El **logo** `ccna-dl` en ASCII (colores cian/azul/magenta; solo caracteres ASCII, se ve bien en PowerShell y cmd).
 - Mensajes de login, título del curso y número de capítulos encontrados (el detalle depende de `-v`).
-- La **pantalla de carga** (cli-progress `MultiBar`, refresco cada 125 ms):
-  - barra total con capítulos hechos, %, tiempo transcurrido y ETA;
-  - **indicador de memoria** (`src/ui/resource-monitor.ts`): RSS de Node + suma de memoria del árbol de procesos del Chrome lanzado por puppeteer (a partir de `browser.process().pid`), RAM libre y pico. En Windows lo mide **un solo** PowerShell en segundo plano con `Get-CimInstance Win32_Process` (no usa `wmic`, que ya no viene en Windows 11) cada 2 s; en Linux/macOS, `ps`. En Windows es *working set*, que cuenta dos veces la memoria compartida entre procesos de Chrome, así que es una cota alta. Amarillo con < 1,5 GB libres, rojo con < 700 MB;
-  - **una barra con spinner por pestaña**: capítulo en curso, fase (`abriendo` → `esperando contenido` → `vídeos` → `animaciones` → `recursos (N)` → `escribiendo HTML`; también `reintento N` y `2ª captura`) y segundos que lleva.
-  - Mientras hay barras, cualquier `console.log` se escribe por encima de ellas sin romperlas.
-  - En la consola clásica de Windows el spinner es `| / - \`; en Windows Terminal, VS Code, Linux y macOS usa caracteres braille.
-- Una línea por capítulo con su resultado y tiempo, coloreada (verde `✔`, amarillo `⚠`, rojo `✖`), por ejemplo `[1/1] 1.0 · ✔ guardado con avisos (49 recursos, 18s)`.
+- **Términos:** *capítulo* = módulo (`1`, `2`…); *subcapítulo* = apartado (`1.0`, `1.1`…; el elemento `2`, página del módulo, va dentro del capítulo 2); *índice del curso* = la lista de subcapítulos que se lee de Netacad (antes «outline»). Se muestran `Estudiante:` y `Curso:`.
+- **Mensajes** (`src/ui/log.ts`): cada uno en su línea con etiqueta `[INFO]`, `[OK]`, `[WARN]`, `[ERROR]` (cian/verde/amarillo/rojo, pero legibles sin color). Se ajustan al ancho (`process.stdout.columns`) con sangría de continuación; los avisos y errores van a stderr. Mientras hay barras, cualquier `console.log/warn/error` pasa por el logger y se imprime encima sin romperlas.
+- **Registro detallado** `<carpeta del curso>/ccna-dl.log`: todo lo que pasa, en cualquier nivel `-v`, sin colores y con hora: URLs de recursos que faltan, códigos HTTP, error completo de cada subcapítulo, reintentos, reciclado de pestañas.
+- La **pantalla de carga** (`src/progress.ts` + `src/ui/live.ts`, dibujo ANSI propio a 8 fps, sin cli-progress):
+  - una **barra por capítulo** en orden numérico (el % es la suma del avance de sus subcapítulos) y debajo, con sangría, **cada subcapítulo** con su barra: pendiente, en curso con su fase (`abriendo` → `esperando` → `vídeos` → `animaciones` → `recursos` → `escribiendo`) y tiempo, o terminado (`✔`, `⚠` con avisos, `✖` fallido, `ya guardado`);
+  - un capítulo terminado se **congela** encima como líneas fijas; la zona dinámica solo tiene los capítulos en curso (pueden ser varios a la vez), la barra total (`N/T subcapítulos · %, ETA`) y la línea de RAM;
+  - nunca pasa de la altura de la terminal: primero se resumen los pendientes («… y N más pendientes»), luego los terminados y, en último caso, solo las líneas de capítulo;
+  - cada línea se recorta al ancho (con `…` en el título) para que el redibujado no se rompa al partirse;
+  - **indicador de memoria** (`src/ui/resource-monitor.ts`): RSS de Node + memoria del árbol de procesos del Chrome de puppeteer, RAM libre y pico. En Windows, un solo PowerShell en segundo plano con `Get-CimInstance Win32_Process` cada 2 s; en Linux/macOS, `ps`. Amarillo con < 1,5 GB libres, rojo con < 700 MB;
+  - en la consola clásica de Windows se usan caracteres ASCII; en Windows Terminal, VS Code, Linux y macOS, bloques y braille.
+- **Avisos cortos** (`src/warnings.ts`): `[WARN] 1.2 Nombre: 14 recursos no existen en el servidor, 1 vídeo sin reproductor offline`. Sin URLs (van al registro). Las fuentes del curso (`/fonts/`, `.woff`, `.ttf`…) que no existen en el servidor salen una sola vez para todo el curso. Un subcapítulo sin avisos no imprime nada con barras (ya lo muestra su `✔`); sin terminal sale `[OK] 1.1 Nombre (52 recursos, 8s)` con `-v 2`.
+- La carpeta de salida, `ccna-dl.log` e `index.html` se muestran con **ruta absoluta**.
 - Al terminar, la memoria pico (Node + Chrome).
-- Sin terminal (redirección a archivo, CI) o con `--no-progress`: sin barras ni colores, solo líneas.
-- Al final, un **resumen**: capítulos guardados / omitidos / parciales / fallidos, duración total y, con paralelismo, la ganancia estimada (`ganancia ×N`).
+- Sin terminal (redirección a archivo, CI) o con `--no-progress`: sin barras ni colores, las mismas líneas con etiqueta y una línea al terminar cada capítulo.
+- Al final, un **resumen**: subcapítulos guardados / omitidos / parciales / fallidos, duración total y, con paralelismo, la ganancia estimada (`ganancia ×N`).
 
 ### 5.4 Ctrl+C
 
@@ -259,6 +264,7 @@ Dentro de `--out-dir` se crea una carpeta por curso, llamada `<id-del-curso>_<t�
     │   └── files/                 # otros archivos (PDF, ZIP, …)
     ├── descarga-resumen.json      # resultado de la última ejecución (con --only se mezcla con el anterior)
     ├── outline-cache.json         # capítulo → view ID (caché para --only)
+    ├── ccna-dl.log                # registro detallado de cada ejecución (se añade al final)
     └── descarga-fallos.json       # capítulos pendientes de reintentar
 ```
 
@@ -344,10 +350,13 @@ flowchart TD
 | `memory.ts` | Reciclado (heap por `page.metrics()`, RAM libre) y plan de pestañas según la RAM libre. |
 | `verify-chapter.ts` | Verificación de un capítulo guardado (formato, texto, loaders, referencias locales, marca de incompleto). |
 | `run-summary.ts` | Lectura/escritura de `descarga-resumen.json` y `descarga-fallos.json`. |
-| `progress.ts` | Pantalla de carga: barra total, indicador de RAM y una barra con spinner por pestaña (cli-progress); degrada a líneas sin terminal. |
+| `progress.ts` | Pantalla de carga: barra por capítulo con sus subcapítulos debajo, capítulos terminados congelados, barra total y RAM; degrada a líneas sin terminal. |
+| `ui/live.ts` | Zona dinámica ANSI al pie de la terminal; los mensajes se imprimen encima. |
+| `ui/text.ts` | Ancho visible, recorte con `…` y ajuste de líneas al ancho de la terminal. |
+| `warnings.ts` | Avisos cortos agrupados por tipo y detección de fuentes (aviso único). |
 | `ui/banner.ts` | Logo ASCII. |
 | `ui/colors.ts` | Colores (picocolors) con detección de `NO_COLOR`/`FORCE_COLOR`/TTY. |
-| `ui/log.ts` | Niveles de verbosidad (`-v 1-3`) y salida por encima de las barras. |
+| `ui/log.ts` | Etiquetas `[INFO]/[OK]/[WARN]/[ERROR]`, niveles `-v 1-3`, ajuste al ancho, salida por encima de las barras y registro `ccna-dl.log`. |
 | `ui/resource-monitor.ts` | Medición de RAM de Node + Chrome cada ~2 s (PowerShell/CIM en Windows, `ps` en Linux/macOS). |
 | `url-to-chapter-id.ts` | Obtiene el número de capítulo de una URL (parámetro `_chapter` o patrón `N.N`). |
 | `config/env.ts` | Carga de `.env` (`dotenv`) y tipado de `PASSWORD` / `NODE_ENV`. |
@@ -459,6 +468,7 @@ npm test
 | Archivo | Qué cubre |
 |---|---|
 | `test/unit.test.js` | Utilidades (backoff, reintentos, `mapPool`, `waitUntil`, `fmtDuration`), `lowercasePathVariant`, `verifyChapterHtml`, y que el validador no tome `url(%23id)` dentro de `data:` como referencia rota. |
+| `test/ui.test.js` | Interfaz de terminal: avisos cortos sin URLs, fuentes detectadas para el aviso único, etiquetas `[INFO]/[WARN]/[ERROR]/[OK]`, ninguna línea pasa del ancho, orden numérico de capítulos y registro `ccna-dl.log` sin colores. |
 | `test/subtopics.test.js` | Subtemas falsos (IP/redes), `dropShadowedSubchapters`/`dedupeByFileId`, filtro al leer capítulos y al construir el índice, `bogusSubtopic` del validador y `scripts/clean-fake-chapters.js` (simulación no modifica; `--apply` respalda, limpia y aparta). |
 | `test/video.test.js` | Vídeos con el servidor fixture + puppeteer (necesita ffmpeg para generar el vídeo): reproductor diferido con URL firmada mp4 y HLS (vía ffmpeg), reescritura a rutas locales, `.vtt` incrustado, apertura por `file://` (`readyState`, `duration`, pistas, sin peticiones externas), `video=none` → aviso y pendiente, `--no-videos`, formato 3 y reanudación. |
 | `test/animation.test.js` | Animaciones: el fixture `anim=ok` imita `<adobe-animate-view>` (canvas vacío hasta pulsar play, textos animados por JS, `<play-pause>`/`<aa-scrubber>` con Shadow DOM). Comprueba la grabación `.webm`, el HTML con `file://` (panel con contenido, deslizador que avanza, arrastrar el deslizador mueve el vídeo, textos según la línea de tiempo, sin peticiones externas), `anim=dead` → aviso y pendiente sin bucle, `--no-animations`, `--debug-network` sin tokens ni cookies, `sanitizeUrl`, `countPendingAnimations` y el aviso «animación sin recursos locales» del validador. |

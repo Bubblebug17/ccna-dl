@@ -90,7 +90,7 @@ Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y
 | `<urls…>` | — | Una o más URLs de cursos launch. |
 | `-u`, `--user` | — | Correo o usuario de Netacad (no hace falta con `--validate`). |
 | `-o`, `--out-dir` | `.` | Carpeta donde se guardan los cursos. |
-| `-c`, `--concurrency` | `2` | Capítulos a la vez (pestañas), máximo 6. Baja automáticamente si hay poca RAM libre. Cada pestaña puede usar ~1 GB. |
+| `-c`, `--concurrency` | `2` | Subcapítulos a la vez (pestañas), máximo 6. Baja automáticamente si hay poca RAM libre. Cada pestaña puede usar ~1 GB. |
 | `--only` | — | Solo parte del curso: `2`, `2.3`, `2.1,2.3,5`, `2.1-2.4`, `2-4`. El índice y el resumen se mezclan con lo ya descargado. |
 | `--force` | no | Vuelve a descargar aunque el capítulo ya exista y esté verificado. |
 | `--retry-failed` | no | Descarga solo los capítulos de `descarga-fallos.json`. |
@@ -105,7 +105,7 @@ Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y
 | `--asset-concurrency` | `6` | Recursos descargados a la vez por capítulo. |
 | `--fast` | no | Modo rápido y menos seguro: esperas más cortas y más bloqueos. |
 | `--no-block-trackers` | no | No bloquea analítica ni publicidad (por defecto se bloquean). |
-| `-v`, `--verbose` | `2` | Nivel de detalle `1`-`3`: `1` = mínimo (barras, avisos, errores y resumen), `2` = normal (resultado de cada capítulo), `3` = detallado (login paso a paso, reintentos, omitidos, reciclado de pestañas). |
+| `-v`, `--verbose` | `2` | Nivel de detalle `1`-`3`: `1` = mínimo (barras, avisos, errores y resumen), `2` = normal (pasos principales y resultado de cada subcapítulo), `3` = detallado (login paso a paso, reintentos, omitidos, reciclado de pestañas). |
 | `--no-banner` | no | No muestra el logo ASCII al iniciar. |
 | `--no-color` | no | Sin colores. También con la variable `NO_COLOR=1` o al redirigir la salida a un archivo. |
 | `--no-progress` | no | Sin barras ni spinners, solo líneas de texto. Es automático si la salida no es una terminal. |
@@ -113,20 +113,31 @@ Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y
 
 ### Interfaz en la terminal
 
-Al iniciar se muestra el logo de `ccna-dl`. Durante la descarga verás:
+Términos: **capítulo** = módulo del curso (`1`, `2`…); **subcapítulo** = cada apartado (`1.0`, `1.1`…); **índice del curso** = la lista de capítulos que se lee de Netacad.
+
+Al iniciar se muestra el logo de `ccna-dl`. Durante la descarga verás una barra por capítulo, en orden, y debajo sus subcapítulos:
 
 ```
- ██████████░░░░░░░░░░░░░░░░ 12/31 capítulos · 38% · 4m10s ETA 6m35s
+[WARN]  14 recursos del curso no existen en el servidor (fuentes); se omiten en todos los subcapítulos.
+[WARN]  1.2 Configurar puertos de un switch: 3 recursos no existen en el servidor, 1 vídeo sin reproductor offline
+✔ 1   Configuración básica de dispositivos             ████████████████       100%    5/5
+    ✔ 1.1   Configuración de un switch con parámetros  ████████████████       100%     8s
+    ⚠ 1.2   Configurar puertos de un switch            ████████████████       100%     9s
+⠹ 2   Conceptos de switching                           ██████░░░░░░░░░░        38%    2/5
+    ✔ 2.0   Introducción                               ████████████████       100%     8s
+    ⠼ 2.1   Reenvío de tramas                          ███████░░░░░░░░░    12s  recursos
+    · 2.2   Dominios de switching                      ░░░░░░░░░░░░░░░░       pendiente
+ ███████░░░░░░░░░░░░░░░ 7/31 subcapítulos · 23% · 1m10s ETA 3m50s
  ▣ RAM 2.4 GB (node 160 MB · chrome 2.2 GB/9p) · libre 5.1 GB · pico 2.9 GB
-  ⠹ pestaña 1  2.3.2   ███████████████░░░░░░░░░░░    41s  animaciones
-  ⠼ pestaña 2  2.3.3   ██████████████████████░░░░    18s  recursos (52)
 ```
 
-- Una barra total con el tiempo y la ETA.
-- El indicador de memoria, actualizado cada ~2 s: Node más todos los procesos del Chrome de puppeteer (no tu Chrome normal). Se pone amarillo con menos de 1,5 GB libres y rojo con menos de 700 MB.
-- Una línea con spinner por pestaña (tantas como `--concurrency`): capítulo, fase (abriendo, esperando contenido, vídeos, animaciones, recursos, escribiendo HTML) y tiempo que lleva.
+- Cada mensaje va en su propia línea con una etiqueta que se lee bien sin colores: `[INFO]`, `[OK]`, `[WARN]`, `[ERROR]`. Ninguna línea pasa del ancho de la terminal: los mensajes largos siguen en la línea siguiente con sangría y en las barras se recorta el título con `…`.
+- El % de un capítulo es la suma del avance de sus subcapítulos. Un capítulo terminado queda fijo encima; abajo solo se redibujan los capítulos en curso, la barra total y la RAM. Si no cabe en la altura de la terminal se resume con «… y N más pendientes».
+- Los avisos son cortos y agrupados (sin URLs). Las fuentes del curso que faltan en el servidor (ciscoSansTT…) se avisan **una sola vez**. El detalle completo (URLs, códigos HTTP, errores) va a `<carpeta del curso>/ccna-dl.log` y a la pantalla con `-v 3`.
+- La carpeta de salida y el `index.html` se muestran con la ruta absoluta.
+- El indicador de memoria se actualiza cada ~2 s: Node más todos los procesos del Chrome de puppeteer (no tu Chrome normal). Amarillo con menos de 1,5 GB libres y rojo con menos de 700 MB.
 
-Si la salida va a un archivo (`> log.txt`) o usas `--no-progress`, se escriben solo líneas de texto, sin colores.
+Si la salida va a un archivo (`> log.txt`) o usas `--no-progress`, se escriben solo líneas de texto con las mismas etiquetas, sin colores.
 
 ```powershell
 # Salida mínima
@@ -164,11 +175,12 @@ node scripts/clean-fake-chapters.js --root D:\cursos --apply    # aplica y guard
 <out-dir>/
 └── <id>_<Título del curso>/
     ├── index.html               # índice con enlaces a los capítulos
-    ├── chapters/1.0.html …      # un HTML por capítulo
+    ├── chapters/1.0.html …      # un HTML por subcapítulo
     ├── assets/                  # css, fonts, img, video, files
     ├── descarga-resumen.json    # resultado de la última ejecución
     ├── descarga-fallos.json     # pendientes para --retry-failed
     ├── outline-cache.json       # caché del índice del curso para --only
+    ├── ccna-dl.log              # registro detallado (URLs, códigos de error, reintentos)
     └── debug/                   # solo con opciones --debug-*
 ```
 
