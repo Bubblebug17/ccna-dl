@@ -6,9 +6,9 @@ import sanitize = require('sanitize-filename');
 import {
   buildIndexHtml,
   chapterFileName,
-  entriesFromSavedChapters,
+  collectIndexEntries,
   IndexEntry,
-  mergeIndexEntries,
+  entriesFromSavedChapters,
   saveChapterHtml,
   SaveChapterResult,
 } from './save-chapter-html';
@@ -590,8 +590,8 @@ export async function saveLaunchCourseSite(
 
   // ---- índice: capítulos nuevos + los que ya estaban en disco (orden determinista) ----
   let indexPath: string | undefined;
-  const fromDisk = await entriesFromSavedChapters(chaptersDir);
-  const indexEntries = mergeIndexEntries(fromDisk, entries.filter((e): e is IndexEntry => !!e));
+  // índice anterior + HTML en disco + lo de esta ejecución: un reintento nunca cambia un título real por "Subtema …"
+  const indexEntries = await collectIndexEntries(siteDir, entries.filter((e): e is IndexEntry => !!e));
   if (indexEntries.length === 0) {
     warn('No hay subcapítulos guardados. No se actualiza index.html para no borrar el índice anterior.');
   } else {

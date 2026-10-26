@@ -83,6 +83,16 @@ node lib/cli.js --validate --out-dir D:\cursos
 
 Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y se continúa con lo que falta. Con **Ctrl+C**, el programa termina de escribir los capítulos en curso y se detiene; para seguir, vuelve a ejecutar el mismo comando.
 
+### Reparar el índice (`--rebuild-index`)
+
+Si `index.html` muestra "Subtema 1.2.1" en lugar del título real o números mal puestos, se regenera **sin login ni descargas** a partir de lo que ya está en disco (títulos `headingtitle` de cada subcapítulo, `<title>` de la sección y el `index.html` anterior):
+
+```bash
+node lib/cli.js --rebuild-index -o "<carpeta de salida>"
+```
+
+Cada descarga normal, `--only` o `--retry-failed` también reconstruye el índice así: mezcla el índice anterior con lo guardado y nunca cambia un título real por "Subtema …".
+
 ### Vídeos y `--retry-failed`
 
 Los vídeos HLS (`.m3u8`, p. ej. `videos.netacad.com`) se descargan **con la sesión del navegador**: el manifiesto, la variante de más calidad y los segmentos se piden con las cookies actuales de esa URL, el User-Agent real y el Referer del reproductor (y, si la CDN aún responde 403, desde dentro del propio iframe del reproductor). ffmpeg solo une los segmentos ya descargados (sin red ni cabeceras en la línea de comandos). Si un vídeo da 401/403, el subcapítulo se vuelve a abrir **una vez** para reactivar el reproductor y capturar una URL nueva. Lo que siga fallando queda en `descarga-fallos.json` con identificadores estables (`videoId`, versión, idioma, archivo y número de reproductor; nunca la URL firmada) y `--retry-failed` lo reintenta con la sesión nueva. El HTML del subcapítulo se reescribe en el reintento: los vídeos que ya estaban en disco se reutilizan y el que faltaba solo pasa a ser local si se descarga bien (si no, sigue apuntando a internet).
@@ -97,6 +107,7 @@ Los vídeos HLS (`.m3u8`, p. ej. `videos.netacad.com`) se descargan **con la ses
 | `-c`, `--concurrency` | `2` (`1` en Termux) | Subcapítulos a la vez (pestañas), máximo 6. En Termux/Android el valor por defecto es 1 (puedes subirlo a mano). Baja automáticamente si hay poca RAM libre. Cada pestaña puede usar ~1 GB. |
 | `--only` | — | Solo parte del curso: `2`, `2.3`, `2.1,2.3,5`, `2.1-2.4`, `2-4`. El índice y el resumen se mezclan con lo ya descargado. |
 | `--force` | no | Vuelve a descargar aunque el capítulo ya exista y esté verificado. |
+| `--rebuild-index` | no | Regenera offline el `index.html` de los cursos en `--out-dir` (títulos y numeración) sin descargar nada. |
 | `--retry-failed` | no | Vuelve a abrir solo los subcapítulos de `descarga-fallos.json` con la sesión actual (vídeos incluidos: se re-captura su URL). |
 | `--refresh-outline` | no | Con `--only`: ignora `outline-cache.json` y vuelve a leer el índice del curso. |
 | `--validate` | no | Valida sin conexión las descargas de `--out-dir` y escribe `validation-report.md`. No descarga nada. |

@@ -1387,26 +1387,82 @@ function compareChapterIds(a: string, b: string): number {
   return 0;
 }
 
+const PLACEHOLDER_RE = /^Subtema \d+(?:\.\d+)*$/;
+
+/** true si el título es el texto de relleno ("Subtema 1.2.3") o está vacío. */
+export function isPlaceholderTitle(title: string | undefined): boolean {
+  const t = (title ?? '').trim();
+  return !t || PLACEHOLDER_RE.test(t) || /^\d+(?:\.\d+)*$/.test(t);
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+}
+
+/** Quita invisibles, "Módulo N: … |" y el número inicial ("1.3. ", "1.2.1 ") de un título. */
+export function cleanTitle(title: string, num?: string): string {
+  let t = decodeEntities(title ?? '').replace(/[\u200b-\u200f\u2060-\u206f\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+  const parts = t.split('|').map((x) => x.trim()).filter(Boolean);
+  if (parts.length) t = parts[parts.length - 1];
+  const stripped = t.replace(/^\d+(?:\.\d+)*\.?\s+/, '').trim();
+  if (stripped && (!num || t.startsWith(num) || /^\d+(?:\.\d+)*\.?\s/.test(t))) t = stripped;
+  return t;
+}
+
+/** Número de sección a mostrar: el archivo "2" es la sección 2.1 (X.1 -> X al nombrar el archivo). */
+export function displayChapterNumber(chapterId: string): string {
+  return /^\d+$/.test(chapterId) ? `${chapterId}.1` : chapterId;
+}
+
 export function parseSubtopicsFromSavedHtml(html: string, chapterId?: string): Subtopic[] {
   const result: Subtopic[] = [];
   const seen = new Set<string>();
   const re = /data-sub="(\d+\.\d+\.\d+)"/g;
+  const marks: Array<{ sub: string; at: number }> = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(html)) !== null) {
-    const sub = m[1];
+  while ((m = re.exec(html)) !== null) marks.push({ sub: m[1], at: m.index });
+  for (let i = 0; i < marks.length; i++) {
+    const { sub, at } = marks[i];
     if (seen.has(sub)) continue;
     seen.add(sub);
-    const chunk = html.slice(m.index, m.index + 8000);
-    // el primer encabezado puede ser basura sin letras ("<h1>\u00a0</h1>"): se usa el primero con texto
+    const end = Math.min(html.length, marks[i + 1]?.at ?? html.length, at + 200_000);
+    const chunk = html.slice(at, end);
+    // Netacad guarda el título en el atributo headingtitle="1.0.1 …" del <heading-view>
     const cands = [
+      ...chunk.matchAll(/\bheadingtitle="([^"]+)"/gi),
       ...chunk.matchAll(/class="[^"]*headingtitle[^"]*"[^>]*>([^<]+)/gi),
-      ...chunk.matchAll(/<h[1-6][^>]*>(?:<[^>]+>)*([^<]+)/gi),
-    ].map((x) => x[1].trim());
+      ...chunk.slice(0, 20_000).matchAll(/<h[1-6][^>]*>(?:<[^>]+>)*([^<]+)/gi),
+    ].map((x) => cleanTitle(x[1], sub));
     const found = cands.find((c) => /\p{L}/u.test(c));
     result.push({ sub, title: found ? found : `Subtema ${sub}` });
   }
   const section = chapterId ? sectionOfChapter(chapterId) : undefined;
   return filterSubtopics(result, section).sort((a, b) => compareChapterIds(a.sub, b.sub));
+}
+
+/** Lee las entradas de un index.html generado antes (para conservar títulos ya conocidos). */
+export function entriesFromIndexHtml(html: string): IndexEntry[] {
+  const entries: IndexEntry[] = [];
+  const chapRe = /<li class="chap"><a href="([^"]+)"[^>]*>\s*<span class="num">([^<]*)<\/span>\s*<span class="t">([^<]*)<\/span><\/a>([\s\S]*?)<\/li>\s*(?=<li class="chap"|<\/ul>\s*<\/nav>|<\/ul>\s*<\/div>|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = chapRe.exec(html)) !== null) {
+    const file = decodeEntities(m[1]);
+    const chapter = file.replace(/^.*\//, '').replace(/\.html$/i, '');
+    const subtopics: Subtopic[] = [];
+    for (const s of m[4].matchAll(/<span class="num">([^<]*)<\/span>\s*<span class="t">([^<]*)<\/span>/g)) {
+      subtopics.push({ sub: decodeEntities(s[1]).trim(), title: decodeEntities(s[2]).trim() });
+    }
+    entries.push({ chapter, title: decodeEntities(m[3]).trim(), file, subtopics });
+  }
+  return entries;
 }
 
 /** Reconstruye entradas del índice a partir de HTML ya guardados en chapters/. */
@@ -1422,10 +1478,7 @@ export async function entriesFromSavedChapters(
     const html = await readFile(join(chaptersDir, file), 'utf8');
     let title = chapter;
     const tm = html.match(/<title>([^<]+)<\/title>/i);
-    if (tm) {
-      const parts = tm[1].split('|').map((s) => s.trim());
-      title = parts[parts.length - 1] || chapter;
-    }
+    if (tm) title = cleanTitle(tm[1]) || chapter;
     entries.push({
       chapter,
       title,
@@ -1437,16 +1490,70 @@ export async function entriesFromSavedChapters(
   return entries.sort((a, b) => compareChapterIds(a.chapter, b.chapter));
 }
 
-export function mergeIndexEntries(
-  onDisk: IndexEntry[],
-  savedNow: IndexEntry[]
-): IndexEntry[] {
+function mergeSubs(older: Subtopic[] | undefined, newer: Subtopic[] | undefined): Subtopic[] | undefined {
+  if (!older?.length) return newer;
+  if (!newer?.length) return older;
+  const by = new Map<string, Subtopic>();
+  for (const s of older) by.set(s.sub, s);
+  for (const s of newer) {
+    const prev = by.get(s.sub);
+    // nunca se reemplaza un título real por "Subtema X.Y.Z"
+    if (prev && isPlaceholderTitle(s.title) && !isPlaceholderTitle(prev.title)) continue;
+    by.set(s.sub, s);
+  }
+  return [...by.values()].sort((a, b) => compareChapterIds(a.sub, b.sub));
+}
+
+/**
+ * Mezcla listas de entradas (de la más antigua a la más nueva). Lo nuevo gana, salvo que traiga
+ * un título de relleno donde ya había uno real.
+ */
+export function mergeIndexEntries(...lists: IndexEntry[][]): IndexEntry[] {
   const byChapter = new Map<string, IndexEntry>();
-  for (const entry of onDisk) byChapter.set(entry.chapter, entry);
-  for (const entry of savedNow) byChapter.set(entry.chapter, entry);
+  for (const list of lists) {
+    for (const entry of list) {
+      const prev = byChapter.get(entry.chapter);
+      if (!prev) {
+        byChapter.set(entry.chapter, { ...entry });
+        continue;
+      }
+      const titleIsWeak = !entry.title || entry.title === entry.chapter || isPlaceholderTitle(entry.title);
+      byChapter.set(entry.chapter, {
+        ...entry,
+        title: titleIsWeak && prev.title ? prev.title : entry.title,
+        subtopics: mergeSubs(prev.subtopics, entry.subtopics),
+      });
+    }
+  }
   return [...byChapter.values()].sort((a, b) =>
     compareChapterIds(a.chapter, b.chapter)
   );
+}
+
+/** Lee el index.html anterior (si existe), los capítulos en disco y lo recién guardado, y lo mezcla. */
+export async function collectIndexEntries(siteDir: string, savedNow: IndexEntry[] = []): Promise<IndexEntry[]> {
+  const prevHtml = await readFile(join(siteDir, 'index.html'), 'utf8').catch(() => '');
+  const fromIndex = prevHtml ? entriesFromIndexHtml(prevHtml) : [];
+  const fromDisk = await entriesFromSavedChapters(join(siteDir, 'chapters'));
+  const onDisk = new Set(fromDisk.map((e) => e.chapter));
+  // solo se conservan del índice anterior los capítulos que siguen existiendo
+  return mergeIndexEntries(fromIndex.filter((e) => onDisk.has(e.chapter)), fromDisk, savedNow);
+}
+
+/** Regenera index.html de una carpeta de curso sin descargar nada. Devuelve nº de capítulos o 0. */
+export async function rebuildCourseIndex(siteDir: string, courseTitle?: string): Promise<number> {
+  const entries = await collectIndexEntries(siteDir);
+  if (!entries.length) return 0;
+  let title = courseTitle;
+  if (!title) {
+    const prev = await readFile(join(siteDir, 'index.html'), 'utf8').catch(() => '');
+    title = prev.match(/<title>([^<]*)<\/title>/i)?.[1];
+    title = title ? decodeEntities(title) : siteDir.replace(/[\\/]+$/, '').replace(/^.*[\\/]/, '').replace(/^[0-9a-f-]{36}_/i, '');
+  }
+  const indexPath = join(siteDir, 'index.html');
+  await writeFile(`${indexPath}.part`, buildIndexHtml(title, entries), 'utf8');
+  await rename(`${indexPath}.part`, indexPath);
+  return entries.length;
 }
 
 export function buildIndexHtml(
@@ -1461,13 +1568,13 @@ export function buildIndexHtml(
           (s) =>
             `<li class="sub"><a href="${e.file}#sub-${escapeHtml(s.sub)}" target="content" data-file="${e.file}">` +
             `<span class="num">${escapeHtml(s.sub)}</span> ` +
-            `<span class="t">${escapeHtml(s.title)}</span></a></li>`
+            `<span class="t">${escapeHtml(cleanTitle(s.title, s.sub) || s.title)}</span></a></li>`
         )
         .join('\n');
       return (
         `<li class="chap"><a href="${e.file}" target="content" data-file="${e.file}">` +
-        `<span class="num">${escapeHtml(e.chapter)}</span> ` +
-        `<span class="t">${escapeHtml(stripChapterPrefix(e.title))}</span></a>` +
+        `<span class="num">${escapeHtml(displayChapterNumber(e.chapter))}</span> ` +
+        `<span class="t">${escapeHtml(cleanTitle(e.title, displayChapterNumber(e.chapter)) || e.title)}</span></a>` +
         (subs ? `<ul class="subs">\n${subs}\n</ul>` : '') +
         `</li>`
       );
@@ -1521,11 +1628,6 @@ ${links}
 </html>`;
 }
 
-function stripChapterPrefix(title: string): string {
-  if (!title) return '';
-  const parts = title.split('|');
-  return parts[parts.length - 1].trim() || title;
-}
 
 function escapeHtml(s: string): string {
   return s
