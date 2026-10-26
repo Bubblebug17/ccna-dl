@@ -14,7 +14,7 @@ const SHADES = [c.cyan, c.cyan, c.blue, c.blue, c.magenta];
 export function banner(version: string): string {
   const lines = LOGO.map((l, i) => (colorsOn ? c.bold(SHADES[i](l)) : l));
   lines.push(
-    ' ' + c.dim('Netacad / Cisco -> HTML offline') + '  ' + c.bold(c.white('v' + version)),
+    ' ' + c.dim('Netacad / Cisco -> HTML offline. By @Bubblebug17') + '  ' + c.bold(c.white('v' + version)),
     ''
   );
   return lines.join('\n');
