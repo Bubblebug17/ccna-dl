@@ -1,3 +1,4 @@
+import { ffmpegBin } from './platform';
 import { spawn } from 'child_process';
 import { createHash } from 'crypto';
 import { mkdir, rename, rm, stat, writeFile } from 'fs/promises';
@@ -183,7 +184,7 @@ async function saveWebm(siteDir: string, data: Buffer): Promise<{ rel: string; b
 
 function remuxWebm(src: string, dest: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const bin = process.env.FFMPEG_PATH || 'ffmpeg';
+    const bin = ffmpegBin();
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(bin, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', src, '-c', 'copy', '-f', 'webm', dest], { stdio: 'ignore', windowsHide: true });

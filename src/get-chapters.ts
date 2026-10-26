@@ -1,5 +1,8 @@
+import { log } from './ui/log';
 import { HTTPResponse, Page } from 'puppeteer';
-import * as cliProgress from 'cli-progress';
+import { LiveArea } from './ui/live';
+import { termWidth } from './ui/text';
+import { c } from './ui/colors';
 import { dropShadowedSubchapters } from './chapter-ids';
 import { describeOnly, explicitChaptersOfOnly, matchesOnly, modulesOfOnly, OnlySpec, parseOnly } from './only-spec';
 import { waitForSpinners } from './wait-for-spinners';
@@ -27,31 +30,33 @@ declare global {
   }
 }
 
-/** Barra de progreso para el escaneo del outline (0–100). */
+/** Barra (una línea) para la lectura del índice del curso (0–100); los mensajes salen por encima. */
 class OutlineScanProgress {
-  private bar: cliProgress.SingleBar | null = null;
+  private area: LiveArea | null = null;
+  private pct = 0;
+  private msg = 'iniciando…';
+  private title = '';
 
-  start(title = 'Escaneando outline') {
-    this.bar = new cliProgress.SingleBar(
-      {
-        format: `  ${title} |{bar}| {percentage}% | {message}`,
-        barCompleteChar: '\u2588',
-        barIncompleteChar: '\u2591',
-        hideCursor: true,
-      },
-      cliProgress.Presets.shades_classic
-    );
-    this.bar.start(100, 0, { message: 'iniciando…' });
+  start(title = 'Leyendo el índice del curso') {
+    this.title = title;
+    if (process.stdout.isTTY) this.area = new LiveArea(() => [this.line()]);
+  }
+
+  private line(): string {
+    const w = Math.max(10, Math.min(30, termWidth() - this.title.length - 30));
+    const fill = Math.round((this.pct / 100) * w);
+    return `  ${this.title} ${c.cyan('█'.repeat(fill))}${c.dim('░'.repeat(w - fill))} ${String(this.pct).padStart(3)}% ${c.dim(this.msg)}`;
   }
 
   set(percent: number, message: string) {
-    const p = Math.max(0, Math.min(100, Math.round(percent)));
-    this.bar?.update(p, { message: message.slice(0, 44) });
+    this.pct = Math.max(0, Math.min(100, Math.round(percent)));
+    this.msg = message;
+    if (!this.area) log.detail(`${this.title}: ${this.pct}% ${message}`);
   }
 
   stop() {
-    this.bar?.stop();
-    this.bar = null;
+    this.area?.stop();
+    this.area = null;
   }
 }
 
@@ -68,9 +73,9 @@ export async function getChapterUrls(
   options?: GetChapterOptions
 ): Promise<string[]> {
   if (isLaunchPage(page.url())) {
-    console.log('Getting Launch Chapter URLs');
+    log.detail('Leyendo las direcciones de los subcapítulos…');
     if (options?.only) {
-      console.log(`Modo --only: ${describeOnly(parseOnly(options.only))} (se lee solo el outline de esos módulos).`);
+      log.info(`Modo --only: ${describeOnly(parseOnly(options.only))} (se lee solo esa parte del índice del curso).`);
     }
     return getLaunchChapterUrls(page, options);
   }
@@ -239,9 +244,9 @@ async function getLaunchChapterUrls(
 
   page.on('response', onResponse);
   const progress = new OutlineScanProgress();
-  progress.start('Capítulos');
+  progress.start('Leyendo el índice del curso');
   try {
-    progress.set(2, 'Cargando curriculum (API)…');
+    progress.set(2, 'Cargando índice (API)…');
     await ensureCurriculumTab(page);
     const curriculumUrl = new URL(page.url());
     curriculumUrl.searchParams.set('tab', 'curriculum');
@@ -254,35 +259,35 @@ async function getLaunchChapterUrls(
     await injectOutlineHelpers(page);
     await delay(800);
 
-    progress.set(6, 'Leyendo curriculum (red)…');
+    progress.set(6, 'Leyendo índice (red)…');
     await refetchCurriculumFromNetwork(page, fromNetwork);
     await extractViewsFromPageHtml(page, fromNetwork);
     for (const body of jsonBodies) extractChapterViews(body, fromNetwork);
     const fromNetEarly = entriesFromMap(fromNetwork);
-    progress.set(8, `API: ${fromNetEarly.length} capítulos`);
+    progress.set(8, `API: ${fromNetEarly.length} subcapítulos`);
 
     let fromReact: ChapterEntry[] = [];
 
     {
-      progress.set(10, 'Expandiendo módulos…');
+      progress.set(10, 'Expandiendo capítulos…');
       await expandOutlineModules(page, (round, max, clicks) => {
         progress.set(
           8 + (round / max) * 12,
-          `Expandiendo módulos (${round}/${max}, ${clicks} clics)`
+          `Expandiendo capítulos (${round}/${max}, ${clicks} clics)`
         );
       });
 
-      progress.set(22, 'Recorriendo sidebar…');
+      progress.set(22, 'Recorriendo el índice lateral…');
       await exploreOutlineSidebar(page, (pass, step, total) => {
         const base = 22 + pass * 14;
         progress.set(
           base + (step / Math.max(1, total)) * 12,
-          `Scroll outline paso ${step}/${total}`
+          `Recorriendo el índice, paso ${step}/${total}`
         );
       });
 
       fromReact = await collectViewsFromReactOutline(page);
-      progress.set(40, `React: ${fromReact.length} capítulos`);
+      progress.set(40, `React: ${fromReact.length} subcapítulos`);
       for (const { viewId, chapter } of fromReact) {
         fromNetwork.set(viewId, chapter);
       }
@@ -299,22 +304,22 @@ async function getLaunchChapterUrls(
     for (const { viewId, chapter } of fromReact) {
       fromNetwork.set(viewId, chapter);
     }
-    progress.set(48, `React: ${fromReact.length} capítulos`);
+    progress.set(48, `React: ${fromReact.length} subcapítulos`);
 
     const fromNet = entriesFromMap(fromNetwork);
-    progress.set(52, `Red: ${fromNet.length} capítulos`);
+    progress.set(52, `Red: ${fromNet.length} subcapítulos`);
 
     let fromLinks = await collectViewsFromPageLinks(page);
-    progress.set(56, `Enlaces: ${fromLinks.length} capítulos`);
+    progress.set(56, `Enlaces: ${fromLinks.length} subcapítulos`);
 
     let fromDom = await collectViewsFromDom(page);
-    progress.set(60, `DOM: ${fromDom.length} capítulos`);
+    progress.set(60, `DOM: ${fromDom.length} subcapítulos`);
 
     let fromOutline = await collectViewsFromOutlineTree(page);
-    progress.set(64, `Outline: ${fromOutline.length} capítulos`);
+    progress.set(64, `Índice: ${fromOutline.length} subcapítulos`);
 
     {
-      progress.set(66, 'Segunda pasada del outline…');
+      progress.set(66, 'Segunda pasada del índice…');
       await exploreOutlineSidebar(page, (pass, step, total) => {
         const base = 66 + pass * 8;
         progress.set(
@@ -334,7 +339,7 @@ async function getLaunchChapterUrls(
     }
     progress.set(
       82,
-      `Fusionado: ${mergeChapterEntries(fromNet, fromLinks, fromDom, fromOutline, fromReact).length} capítulos`
+      `Fusionado: ${mergeChapterEntries(fromNet, fromLinks, fromDom, fromOutline, fromReact).length} subcapítulos`
     );
 
     let entries = mergeChapterEntries(
@@ -349,7 +354,7 @@ async function getLaunchChapterUrls(
     const missing = outlineLabels.filter((ch) => !haveChapters.has(ch));
 
     if (missing.length > 0) {
-      progress.set(84, `Resolviendo ${missing.length} capítulo(s)…`);
+      progress.set(84, `Resolviendo ${missing.length} subcapítulo(s)…`);
       const startUrl = page.url();
       const fromResolved = await collectViewsForMissingChapters(
         page,
@@ -358,8 +363,8 @@ async function getLaunchChapterUrls(
         fromNetwork
       );
       if (fromResolved.length < missing.length) {
-        console.warn(
-          `  · ${missing.length - fromResolved.length} capítulo(s) sin view ID tras resolución: ` +
+        log.warn(
+          `${missing.length - fromResolved.length} subcapítulo(s) sin identificador tras resolución: ` +
             `${missing
               .filter((ch) => !fromResolved.some((e) => e.chapter === ch))
               .slice(0, 10)
@@ -369,13 +374,13 @@ async function getLaunchChapterUrls(
       entries = mergeChapterEntries(entries, fromResolved);
     }
 
-    progress.set(100, `Total: ${entries.length} capítulos`);
+    progress.set(100, `Total: ${entries.length} subcapítulos`);
     progress.stop();
 
     if (entries.length === 0) {
       const sample = await sampleOutlineLabels(page);
       throw new Error(
-        'No se encontraron secciones numeradas (p.ej. 1.1, 1.2) en el outline. ' +
+        'No se encontraron secciones numeradas (p.ej. 1.1, 1.2) en el índice del curso. ' +
           `Muestra: ${sample.slice(0, 8).join(' | ') || '(vacío)'}`
       );
     }
@@ -384,8 +389,8 @@ async function getLaunchChapterUrls(
     // coincidiría con "2.2" y la sobrescribiría.
     const shadow = dropShadowedSubchapters(entries);
     if (shadow.dropped.length) {
-      console.warn(
-        `  · ${shadow.dropped.length} elemento(s) del outline ignorados por ser sub-elementos de una sección existente: ` +
+      log.warn(
+        `${shadow.dropped.length} elemento(s) del índice ignorados por ser sub-elementos de una sección existente: ` +
           `${shadow.dropped.map((e) => e.chapter).slice(0, 10).join(', ')}${shadow.dropped.length > 10 ? '…' : ''}`
       );
       entries = shadow.kept;
@@ -397,7 +402,7 @@ async function getLaunchChapterUrls(
       .map((entry) => buildLaunchUrl(baseUrl, entry.viewId, entry.chapter));
 
     await restoreLaunchCurriculumPage(page, baseUrl);
-    console.log(`Encontrados ${urls.length} capítulos en el outline.`);
+    log.step(`Encontrados ${urls.length} subcapítulos en el índice del curso.`);
     return urls;
   } finally {
     progress.stop();
@@ -437,9 +442,9 @@ async function getLaunchChapterUrlsOnly(
 
   page.on('response', onResponse);
   const progress = new OutlineScanProgress();
-  progress.start('Capítulos');
+  progress.start('Leyendo el índice del curso');
   try {
-    progress.set(2, 'Cargando curriculum…');
+    progress.set(2, 'Cargando índice…');
     await ensureCurriculumTab(page);
     const curriculumUrl = new URL(page.url());
     curriculumUrl.searchParams.set('tab', 'curriculum');
@@ -450,7 +455,7 @@ async function getLaunchChapterUrlsOnly(
     await delay(800);
 
     const mods = modulesOfOnly(spec);
-    progress.set(15, `Módulo(s) ${mods.join(', ')}…`);
+    progress.set(15, `Capítulo(s) ${mods.join(', ')}…`);
     await expandModulesByNumber(page, mods);
     await extractViewsFromPageHtml(page, fromNetwork);
     for (const body of jsonBodies) extractChapterViews(body, fromNetwork);
@@ -470,7 +475,7 @@ async function getLaunchChapterUrlsOnly(
 
     if (missing.length > 0) {
       // reserva: otras fuentes del propio outline ya cargado (en página) y la API
-      progress.set(70, `Buscando ${missing.length} capítulo(s) más…`);
+      progress.set(70, `Buscando ${missing.length} subcapítulo(s) más…`);
       await refetchCurriculumFromNetwork(page, fromNetwork);
       for (const body of jsonBodies) extractChapterViews(body, fromNetwork);
       const fromLinks = await collectViewsFromPageLinks(page);
@@ -481,33 +486,33 @@ async function getLaunchChapterUrlsOnly(
       missing = [...wanted].filter((c) => !entries.some((e) => e.chapter === c));
     }
     if (missing.length > 0) {
-      progress.set(85, `Resolviendo ${missing.length} capítulo(s)…`);
+      progress.set(85, `Resolviendo ${missing.length} subcapítulo(s)…`);
       const resolved = await collectViewsForMissingChapters(page, missing, page.url(), fromNetwork);
       entries = pick(entries, resolved);
       missing = [...wanted].filter((c) => !entries.some((e) => e.chapter === c));
     }
 
-    progress.set(100, `Total: ${entries.length} capítulos`);
+    progress.set(100, `Total: ${entries.length} subcapítulos`);
     progress.stop();
 
     const explicit = new Set(explicitChaptersOfOnly(spec));
     for (const c of missing) {
-      console.warn(
+      log.warn(
         explicit.has(c)
-          ? `  ⚠ El capítulo ${c} no existe en el outline (o no se pudo resolver); se continúa con los demás.`
-          : `  ⚠ No se pudo resolver el capítulo ${c} del outline; se continúa con los demás.`
+          ? `El subcapítulo ${c} no existe en el índice del curso (o no se pudo resolver); se continúa con los demás.`
+          : `No se pudo resolver el subcapítulo ${c} del índice del curso; se continúa con los demás.`
       );
     }
     if (entries.length === 0) {
-      console.warn(`  ⚠ --only ${spec.text}: no se encontró ningún capítulo en el outline.`);
+      log.warn(`--only ${spec.text}: no se encontró ningún subcapítulo en el índice del curso.`);
       await restoreLaunchCurriculumPage(page, page.url());
       return [];
     }
 
     const shadow = dropShadowedSubchapters(entries);
     if (shadow.dropped.length) {
-      console.warn(
-        `  · ${shadow.dropped.length} elemento(s) del outline ignorados por ser sub-elementos de una sección existente: ` +
+      log.warn(
+        `${shadow.dropped.length} elemento(s) del índice ignorados por ser sub-elementos de una sección existente: ` +
           shadow.dropped.map((e) => e.chapter).join(', ')
       );
       entries = shadow.kept;
@@ -518,8 +523,8 @@ async function getLaunchChapterUrlsOnly(
       .sort((a, b) => compareChapter(a.chapter, b.chapter))
       .map((entry) => buildLaunchUrl(baseUrl, entry.viewId, entry.chapter));
     await restoreLaunchCurriculumPage(page, baseUrl);
-    console.log(
-      `Encontrados ${urls.length} capítulo(s) pedidos (${describeOnly(spec)}) en ${((Date.now() - t0) / 1000).toFixed(1)} s, leyendo solo el módulo ${mods.join(', ')} del outline.`
+    log.info(
+      `Encontrados ${urls.length} subcapítulo(s) pedidos (${describeOnly(spec)}) en ${((Date.now() - t0) / 1000).toFixed(1)} s, leyendo solo el capítulo ${mods.join(', ')} del índice.`
     );
     return urls;
   } finally {
@@ -762,8 +767,8 @@ async function collectViewsForMissingChapters(
     );
     if (modChapters.length === 0) continue;
 
-    console.log(
-      `  · React módulo ${mod} (${modChapters.length} capítulo(s) pendientes)…`
+    log.info(
+      `Resolviendo el capítulo ${mod} (${modChapters.length} subcapítulo(s) pendientes)…`
     );
     await expandModuleForChapter(page, modChapters[0]).catch(() => undefined);
     await ensureOutlineChapterVisible(page, modChapters[0]).catch(
@@ -775,7 +780,7 @@ async function collectViewsForMissingChapters(
     try {
       fromReact = await collectViewsFromReactOutline(page);
     } catch (e) {
-      console.warn(`  · React falló en módulo ${mod}: ${String(e)}`);
+      log.warn(`No se pudo resolver el capítulo ${mod}: ${String(e)}`);
       continue;
     }
 
@@ -785,14 +790,14 @@ async function collectViewsForMissingChapters(
         results.push(hit);
         resolved.add(ch);
         networkSink?.set(hit.viewId, ch);
-        console.log(`  · ${ch} → view=${hit.viewId.slice(0, 8)}…`);
+        log.detail(`  · ${ch} → view=${hit.viewId.slice(0, 8)}…`);
       }
     }
   }
 
   for (const ch of chapters) {
     if (!resolved.has(ch)) {
-      console.warn(`  · no se pudo resolver view para ${ch}`);
+      log.warn(`No se pudo resolver el subcapítulo ${ch}`);
     }
   }
 

@@ -18,12 +18,13 @@
 11. [Solución de problemas](#11-solución-de-problemas)
 12. [Limitaciones conocidas y riesgos](#12-limitaciones-conocidas-y-riesgos)
 13. [Estado de las descargas existentes y changelog](#13-estado-de-las-descargas-existentes-y-changelog)
+14. [Uso en Termux (Android)](#14-uso-en-termux-android)
 
 ---
 
 ## 1. Qué es y para qué sirve
 
-`ccna-dl` abre Netacad con un navegador automatizado (Puppeteer + Chrome), inicia sesión con **tu propia cuenta**, recorre el índice (outline) de un curso y guarda **cada capítulo como un archivo HTML autónomo** junto con sus recursos (CSS, fuentes, imágenes, archivos). El resultado se puede abrir sin internet.
+`ccna-dl` abre Netacad con un navegador automatizado (Puppeteer + Chrome), inicia sesión con **tu propia cuenta**, recorre el índice de un curso y guarda **cada capítulo como un archivo HTML autónomo** junto con sus recursos (CSS, fuentes, imágenes, archivos). El resultado se puede abrir sin internet.
 
 - **Uso previsto:** personal y educativo, con tu propia cuenta de Netacad y para cursos en los que estás matriculado. No lo uses para redistribuir material (ver el *Disclaimer* del [README](README.md)).
 - Los cursos nuevos de Netacad ("launch") se guardan como **HTML offline**. Solo se admiten enlaces de tipo launch: el modo PDF de la interfaz clásica se quitó (esa interfaz ya no existe).
@@ -109,24 +110,29 @@ $URL = "https://www.netacad.com/es/launch?id=<id>&tab=curriculum&view=<id>"
 | `<urls…>` | — | URL(s) de los cursos (obligatoria al menos una, salvo con `--validate`). |
 | `--user`, `-u` | — | Correo/usuario de Netacad (obligatorio salvo con `--validate`). |
 | `--password`, `-p` | `.env` → pregunta | Contraseña. |
-| `--concurrency`, `-c N` | **2** automático (baja a 1 con poca RAM libre; máx. **6**) | Capítulos descargados a la vez (pestañas del navegador en paralelo). Cada pestaña puede usar ~1 GB; con un valor explícito se respeta pero se avisa si no cabe en la RAM libre. |
-| `--recycle-every N` | **8** (`0` = nunca) | Cada `N` capítulos se vacía y se cierra/reabre la pestaña de cada worker para liberar la memoria del renderer de Chrome. También se recicla antes si el heap de JS de la pestaña supera ~600 MB o la RAM libre baja de ~700 MB. La pestaña de la sesión no se cierra: se cambia de proceso (`chrome://version` → `about:blank`). |
+| `--concurrency`, `-c N` | **2** automático (**1** en Termux; baja a 1 con poca RAM libre; máx. **6**) | Subcapítulos descargados a la vez (pestañas del navegador en paralelo). Cada pestaña puede usar ~1 GB; con un valor explícito se respeta pero se avisa si no cabe en la RAM libre. |
+| `--recycle-every N` | **8** (`0` = nunca; **3** en Termux) | Cada `N` capítulos se vacía y se cierra/reabre la pestaña de cada worker para liberar la memoria del renderer de Chrome. También se recicla antes si el heap de JS de la pestaña supera ~600 MB o la RAM libre baja de ~700 MB. La pestaña de la sesión no se cierra: se cambia de proceso (`chrome://version` → `about:blank`). |
 | `--no-videos` | desactivado | No activa los reproductores ni descarga vídeos (se queda el póster, como antes de la v. 3 del formato). Esos capítulos se guardan con formato 2 y la reanudación no los rehace por vídeos pendientes. |
 | `--no-animations` | desactivado | No pulsa «play» en las animaciones interactivas (`<adobe-animate-view>`) ni las graba (§7.6). Sin esta opción cada animación se graba como `.webm` local (hasta 90 s por animación). |
 | `--debug-network` | desactivado | Depuración (§7.6): escribe `<curso>/debug/red-<capítulo>.json` con los componentes de animación detectados y las peticiones de red de la activación, **sin cookies, cabeceras ni valores de query** (solo nombres de parámetros; los tramos de ruta que parecen tokens salen como `<token>`). |
 | `--out-dir`, `-o` | `.` (carpeta actual) | Carpeta donde se crea la carpeta del curso. |
 | `--only <expr>` | — | Descarga solo una parte del curso **sin sincronizar el curso entero** (§5.5). Acepta un capítulo (`--only 2.3`), un módulo entero (`--only 2`, incluye 2.0, 2.1…), una lista (`--only 2.1,2.3,5`) y rangos (`--only 2.1-2.4`, `--only 2-4`). |
-| `--refresh-outline` | desactivado | Con `--only`: ignora `outline-cache.json` y vuelve a leer el outline (§5.5). |
+| `--refresh-outline` | desactivado | Con `--only`: ignora `outline-cache.json` y vuelve a leer el índice del curso (§5.5). |
 | `--force` | desactivado | Vuelve a descargar todo aunque ya esté guardado y verificado. |
 | `--retry-failed` | desactivado | Descarga solo los capítulos de `descarga-fallos.json`. |
 | `--min-wait ms` | **1500** (500 con `--fast`) | Tiempo mínimo que el contenido debe llevar cargado antes de guardar, *además* de las esperas por condición. |
 | `--chapter-timeout s` | **300** | Segundos máximos por intento de capítulo; al agotarse se reinicia esa pestaña y se reintenta. |
 | `--fast` | desactivado | Modo rápido (opt-in, menos seguro): esperas más cortas y bloquea también `adobedtm` (el vídeo/audio también se bloquea con `--no-videos`). |
 | `--no-block-trackers` | bloqueo activo | No bloquear analítica/publicidad/seguimiento. |
-| `--asset-concurrency N` | **6** | Descargas simultáneas de recursos por capítulo. |
+| `--asset-concurrency N` | **6** (**3** en Termux) | Descargas simultáneas de recursos por capítulo. |
 | `--retries N` | **3** | Reintentos con espera creciente (recursos y capítulos fallidos; los reintentos de capítulo se limitan a 2 extra). |
 | `--debug-screenshot` | desactivado | Depuración: guarda `<curso>/debug/course.png` (vista del curso tras el login). |
-| `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). |
+| `--debug-headful` | desactivado | Depuración: abre Chrome con ventana visible (headless por defecto). No disponible en Termux. |
+| `--browser-path RUTA` | auto | Ejecutable de Chrome/Chromium (también `PUPPETEER_EXECUTABLE_PATH`). En Termux se usa `$PREFIX/bin/chromium-browser`. |
+| `--verbose`, `-v N` | **2** | Verbosidad `1`-`3`. **1**: barras, avisos (`[WARN]`), errores (`[ERROR]`) y resumen final. **2**: además, el logo, los pasos principales (alumno, curso, capítulos encontrados) y una línea por capítulo guardado. **3**: además, login paso a paso, URLs, capítulos omitidos o que se rehacen y por qué, reintentos, reciclado/reinicio de pestañas y (sin terminal) una línea `[memoria]` cada 30 s. Los avisos y errores se ven siempre; las opciones `--debug-*` funcionan igual en cualquier nivel. |
+| `--no-banner` | desactivado | No imprime el logo ASCII (con `-v 1` tampoco se imprime). |
+| `--no-color` | desactivado | Sin colores ANSI. Los colores también se apagan con `NO_COLOR=1`, `TERM=dumb` o si la salida no es una terminal; `FORCE_COLOR=1` los fuerza. |
+| `--no-progress` | desactivado | Sin barras ni spinners: solo líneas (es automático si la salida no es una terminal). |
 | `--validate` | desactivado | Valida **offline** las descargas de `--out-dir` y escribe `validation-report.md`. No descarga ni inicia sesión. |
 | `--help`, `-h` | — | Ayuda. |
 
@@ -216,9 +222,23 @@ Una sola ejecución (un solo login) basta para varios capítulos o módulos: no 
 
 ### 5.3 Qué verás en consola
 
-- Mensajes de login, título del curso y número de capítulos encontrados.
-- Una **barra de progreso** (cli-progress) y una línea por capítulo con su resultado y tiempo, por ejemplo `[1/1] 1.0 · ✔ guardado con avisos (49 recursos, 18s)`.
-- Al final, un **resumen**: capítulos guardados / omitidos / parciales / fallidos, duración total y, con paralelismo, la ganancia estimada (`ganancia ×N`).
+- El **logo** `ccna-dl` en ASCII (colores cian/azul/magenta; solo caracteres ASCII, se ve bien en PowerShell y cmd).
+- Mensajes de login, título del curso y número de capítulos encontrados (el detalle depende de `-v`).
+- **Términos:** *capítulo* = módulo (`1`, `2`…); *subcapítulo* = apartado (`1.0`, `1.1`…; el elemento `2`, página del módulo, va dentro del capítulo 2); *índice del curso* = la lista de subcapítulos que se lee de Netacad (antes «outline»). Se muestran `Estudiante:` y `Curso:`.
+- **Mensajes** (`src/ui/log.ts`): cada uno en su línea con etiqueta `[INFO]`, `[OK]`, `[WARN]`, `[ERROR]` (cian/verde/amarillo/rojo, pero legibles sin color). Se ajustan al ancho (`process.stdout.columns`) con sangría de continuación; los avisos y errores van a stderr. Mientras hay barras, cualquier `console.log/warn/error` pasa por el logger y se imprime encima sin romperlas.
+- **Registro detallado** `<carpeta del curso>/ccna-dl.log`: todo lo que pasa, en cualquier nivel `-v`, sin colores y con hora: URLs de recursos que faltan, códigos HTTP, error completo de cada subcapítulo, reintentos, reciclado de pestañas.
+- La **pantalla de carga** (`src/progress.ts` + `src/ui/live.ts`, dibujo ANSI propio a 8 fps, sin cli-progress):
+  - una **barra por capítulo** en orden numérico (el % es la suma del avance de sus subcapítulos) y debajo, con sangría, **cada subcapítulo** con su barra: pendiente, en curso con su fase (`abriendo` → `esperando` → `vídeos` → `animaciones` → `recursos` → `escribiendo`) y tiempo, o terminado (`✔`, `⚠` con avisos, `✖` fallido, `ya guardado`);
+  - un capítulo terminado se **congela** encima como líneas fijas; la zona dinámica solo tiene los capítulos en curso (pueden ser varios a la vez), la barra total (`N/T subcapítulos · %, ETA`) y la línea de RAM;
+  - nunca pasa de la altura de la terminal: primero se resumen los pendientes («… y N más pendientes»), luego los terminados y, en último caso, solo las líneas de capítulo;
+  - cada línea se recorta al ancho (con `…` en el título) para que el redibujado no se rompa al partirse;
+  - **indicador de memoria** (`src/ui/resource-monitor.ts`): RSS de Node + memoria del árbol de procesos del Chrome de puppeteer, RAM libre y pico. En Windows, un solo PowerShell en segundo plano con `Get-CimInstance Win32_Process` cada 2 s; en Linux/macOS, `ps`. Amarillo con < 1,5 GB libres, rojo con < 700 MB;
+  - en la consola clásica de Windows se usan caracteres ASCII; en Windows Terminal, VS Code, Linux y macOS, bloques y braille.
+- **Avisos cortos** (`src/warnings.ts`): `[WARN] 1.2 Nombre: 14 recursos no existen en el servidor, 1 vídeo sin reproductor offline`. Sin URLs (van al registro). Las fuentes del curso (`/fonts/`, `.woff`, `.ttf`…) que no existen en el servidor salen una sola vez para todo el curso. Un subcapítulo sin avisos no imprime nada con barras (ya lo muestra su `✔`); sin terminal sale `[OK] 1.1 Nombre (52 recursos, 8s)` con `-v 2`.
+- La carpeta de salida, `ccna-dl.log` e `index.html` se muestran con **ruta absoluta**.
+- Al terminar, la memoria pico (Node + Chrome).
+- Sin terminal (redirección a archivo, CI) o con `--no-progress`: sin barras ni colores, las mismas líneas con etiqueta y una línea al terminar cada capítulo.
+- Al final, un **resumen**: subcapítulos guardados / omitidos / parciales / fallidos, duración total y, con paralelismo, la ganancia estimada (`ganancia ×N`).
 
 ### 5.4 Ctrl+C
 
@@ -246,6 +266,7 @@ Dentro de `--out-dir` se crea una carpeta por curso, llamada `<id-del-curso>_<t�
     │   └── files/                 # otros archivos (PDF, ZIP, …)
     ├── descarga-resumen.json      # resultado de la última ejecución (con --only se mezcla con el anterior)
     ├── outline-cache.json         # capítulo → view ID (caché para --only)
+    ├── ccna-dl.log                # registro detallado de cada ejecución (se añade al final)
     └── descarga-fallos.json       # capítulos pendientes de reintentar
 ```
 
@@ -331,7 +352,14 @@ flowchart TD
 | `memory.ts` | Reciclado (heap por `page.metrics()`, RAM libre) y plan de pestañas según la RAM libre. |
 | `verify-chapter.ts` | Verificación de un capítulo guardado (formato, texto, loaders, referencias locales, marca de incompleto). |
 | `run-summary.ts` | Lectura/escritura de `descarga-resumen.json` y `descarga-fallos.json`. |
-| `progress.ts` | Barra de progreso (cli-progress) con líneas por capítulo. |
+| `progress.ts` | Pantalla de carga: barra por capítulo con sus subcapítulos debajo, capítulos terminados congelados, barra total y RAM; degrada a líneas sin terminal. |
+| `ui/live.ts` | Zona dinámica ANSI al pie de la terminal; los mensajes se imprimen encima. |
+| `ui/text.ts` | Ancho visible, recorte con `…` y ajuste de líneas al ancho de la terminal. |
+| `warnings.ts` | Avisos cortos agrupados por tipo y detección de fuentes (aviso único). |
+| `ui/banner.ts` | Logo ASCII. |
+| `ui/colors.ts` | Colores (picocolors) con detección de `NO_COLOR`/`FORCE_COLOR`/TTY. |
+| `ui/log.ts` | Etiquetas `[INFO]/[OK]/[WARN]/[ERROR]`, niveles `-v 1-3`, ajuste al ancho, salida por encima de las barras y registro `ccna-dl.log`. |
+| `ui/resource-monitor.ts` | Medición de RAM de Node + Chrome cada ~2 s (PowerShell/CIM en Windows, `ps` en Linux/macOS). |
 | `url-to-chapter-id.ts` | Obtiene el número de capítulo de una URL (parámetro `_chapter` o patrón `N.N`). |
 | `config/env.ts` | Carga de `.env` (`dotenv`) y tipado de `PASSWORD` / `NODE_ENV`. |
 | `util/retry.ts` | `withRetry`, `backoffMs`, `mapPool`, `waitUntil`, `fmtDuration`. |
@@ -442,6 +470,7 @@ npm test
 | Archivo | Qué cubre |
 |---|---|
 | `test/unit.test.js` | Utilidades (backoff, reintentos, `mapPool`, `waitUntil`, `fmtDuration`), `lowercasePathVariant`, `verifyChapterHtml`, y que el validador no tome `url(%23id)` dentro de `data:` como referencia rota. |
+| `test/ui.test.js` | Interfaz de terminal: avisos cortos sin URLs, fuentes detectadas para el aviso único, etiquetas `[INFO]/[WARN]/[ERROR]/[OK]`, ninguna línea pasa del ancho, orden numérico de capítulos y registro `ccna-dl.log` sin colores. |
 | `test/subtopics.test.js` | Subtemas falsos (IP/redes), `dropShadowedSubchapters`/`dedupeByFileId`, filtro al leer capítulos y al construir el índice, `bogusSubtopic` del validador y `scripts/clean-fake-chapters.js` (simulación no modifica; `--apply` respalda, limpia y aparta). |
 | `test/video.test.js` | Vídeos con el servidor fixture + puppeteer (necesita ffmpeg para generar el vídeo): reproductor diferido con URL firmada mp4 y HLS (vía ffmpeg), reescritura a rutas locales, `.vtt` incrustado, apertura por `file://` (`readyState`, `duration`, pistas, sin peticiones externas), `video=none` → aviso y pendiente, `--no-videos`, formato 3 y reanudación. |
 | `test/animation.test.js` | Animaciones: el fixture `anim=ok` imita `<adobe-animate-view>` (canvas vacío hasta pulsar play, textos animados por JS, `<play-pause>`/`<aa-scrubber>` con Shadow DOM). Comprueba la grabación `.webm`, el HTML con `file://` (panel con contenido, deslizador que avanza, arrastrar el deslizador mueve el vídeo, textos según la línea de tiempo, sin peticiones externas), `anim=dead` → aviso y pendiente sin bucle, `--no-animations`, `--debug-network` sin tokens ni cookies, `sanitizeUrl`, `countPendingAnimations` y el aviso «animación sin recursos locales» del validador. |
@@ -598,3 +627,66 @@ La rama principal `master` está en `2772302` (v1.4.0 original, sin estas mejora
 ---
 
 *Documento generado a partir del código real (`src/cli.ts`, `README.md` y los módulos de `src/`). Si cambias opciones, actualiza este archivo.*
+
+---
+
+## 14. Uso en Termux (Android)
+
+Funciona en un teléfono Android (probado para Android 15, aarch64) usando el **Chromium de Termux** en lugar del Chrome que descarga puppeteer (no existe para Android). El programa detecta Termux solo (`PREFIX` con `com.termux`, `TERMUX_VERSION` o Node para Android) y entonces:
+
+- usa `$PREFIX/bin/chromium-browser` (o `chromium`); `--browser-path` o `PUPPETEER_EXECUTABLE_PATH` tienen prioridad;
+- lanza Chromium sin ventana con `--no-sandbox --disable-gpu --disable-dev-shm-usage`, heap de JS de 512 MB y sin procesos de fondo; los avisos de dbus/inotify de Chromium no se muestran;
+- baja los valores por defecto: `--concurrency 1`, `--recycle-every 3`, `--asset-concurrency 3` (puedes cambiarlos con las mismas opciones);
+- mide la memoria con `/proc/<pid>/status` y `/proc/meminfo` (si Android no deja leerlos, el indicador solo muestra Node);
+- `--debug-headful` no está disponible (no hay pantalla).
+
+### 14.1 Instalación paso a paso
+
+```bash
+pkg update && pkg upgrade
+pkg install nodejs-lts git ffmpeg x11-repo
+pkg install chromium
+termux-setup-storage            # solo si quieres guardar en el almacenamiento del teléfono (acepta el permiso)
+
+git clone https://github.com/Bubblebug17/ccna-dl
+cd ccna-dl
+git checkout feat/termux
+PUPPETEER_SKIP_DOWNLOAD=1 npm install   # no descarga Chrome (también lo omite .puppeteerrc.cjs en Termux)
+npm run build
+bash scripts/termux-check.sh            # comprueba arquitectura, RAM, node, chromium, ffmpeg y una prueba sin ventana
+cp .env.example .env && nano .env       # opcional: PASSWORD=
+```
+
+### 14.2 Uso
+
+```bash
+termux-wake-lock    # evita que Android suspenda Termux con la pantalla apagada (termux-wake-unlock al terminar)
+node lib/cli.js -u tu@correo.com -c 1 --only 1 \
+  --out-dir ~/storage/shared/Download/ccna "https://www.netacad.com/es/launch?id=<id>"
+```
+
+`~/storage/shared/...` es el almacenamiento interno del teléfono (carpeta `Download/ccna` en el explorador de archivos). Si no existe, ejecuta `termux-setup-storage`.
+
+### 14.3 Consejos de RAM
+
+- Cierra las demás apps antes de empezar; Chromium + Node usan ~600 MB–1 GB con una pestaña.
+- Descarga por partes con `--only` (módulo a módulo) y usa `--resume`/sin `--force` para continuar.
+- Si va justo de memoria: `--no-animations`, `--no-videos` o `--recycle-every 1`.
+- Mantén `termux-wake-lock` activo y el teléfono cargando; quita la optimización de batería de Termux en Ajustes.
+
+### 14.4 Plan B: proot-distro con Debian
+
+Si el Chromium de Termux falla (por ejemplo tras una actualización), usa Debian dentro de Termux:
+
+```bash
+pkg install proot-distro
+proot-distro install debian
+proot-distro login debian
+apt update && apt install -y chromium ffmpeg git nodejs npm
+git clone https://github.com/Bubblebug17/ccna-dl && cd ccna-dl && git checkout feat/termux
+PUPPETEER_SKIP_DOWNLOAD=1 npm install && npm run build
+node lib/cli.js --browser-path /usr/bin/chromium -c 1 --recycle-every 3 --asset-concurrency 3 -u tu@correo.com --only 1 "<url>"
+```
+
+Dentro de Debian no se detecta Termux, por eso se indican `--browser-path` y los valores bajos a mano (o `CCNA_DL_TERMUX=1` para activar el modo Termux). El almacenamiento del teléfono está en `/sdcard` si arrancas con `proot-distro login debian --bind /sdcard`.
+

@@ -1,5 +1,6 @@
 import { freemem, totalmem } from 'os';
 import type { Page } from 'puppeteer';
+import { memAvailableMb } from './platform';
 
 /** Cada cuántos capítulos se recicla (cierra y reabre) la pestaña de cada worker. */
 export const DEFAULT_RECYCLE_EVERY = 8;
@@ -19,7 +20,7 @@ const MB = 1024 * 1024;
 export type MemInfo = { freeMb: number; totalMb: number };
 
 export function memInfo(): MemInfo {
-  return { freeMb: Math.round(freemem() / MB), totalMb: Math.round(totalmem() / MB) };
+  return { freeMb: memAvailableMb() ?? Math.round(freemem() / MB), totalMb: Math.round(totalmem() / MB) };
 }
 
 export type TabPlan = {

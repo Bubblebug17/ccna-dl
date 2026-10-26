@@ -1,10 +1,11 @@
 import { HTTPResponse, Page, Target } from 'puppeteer';
+import { log } from './ui/log';
 import { catchedRace, delay } from './util/promise';
 import { waitUntil } from './util/retry';
 import { waitForSpinners } from './wait-for-spinners';
 
 export async function login(page: Page, user: string, password: string) {
-  console.log("Login Page Loaded");
+  log.detail("Login Page Loaded");
   const userElm = await page.$('input[name="username"]');
   if (!userElm) throw 'Username input not found.';
   await userElm.type(user);
@@ -71,12 +72,12 @@ export async function login(page: Page, user: string, password: string) {
 
   const submitBtn = await page.$('input[name="login"]');
   if (!submitBtn) throw 'Login submit button not found.';
-  console.log("Credentials Submitted");
+  log.detail("Credentials Submitted");
   await Promise.all([
     page.waitForNavigation({ waitUntil: 'networkidle2' }),
     submitBtn.click(),
   ]);
-  console.log("Navigation Completed");
+  log.detail("Navigation Completed");
   // resultado conocido (dashboard o error) en cuanto aparece; máx. 5 s como antes
   await waitUntil(
     async () =>
@@ -89,10 +90,10 @@ export async function login(page: Page, user: string, password: string) {
     throw 'Invalid username or password.';
   }
   else if((await page.url()).includes('dashboard')){
-    console.log("Login Successful");
+    log.detail("Login Successful");
   }
   else{
     throw 'Login Failed';
   }
-  //console.log(await page.content());
+  //log.detail(await page.content());
 }

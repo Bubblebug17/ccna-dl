@@ -7,7 +7,7 @@
     "start": "node ./lib/cli.js",
     "deploy": "npm run build && npm start",
     "validate": "node scripts/validate-download.js",
-    "test": "npm run build && node --test --test-timeout=600000 test/unit.test.js test/subtopics.test.js test/save.test.js test/only.test.js test/video.test.js test/animation.test.js test/graphic.test.js test/parallel.test.js",
+    "test": "npm run build && node --test --test-timeout=600000 test/unit.test.js test/ui.test.js test/termux.test.js test/subtopics.test.js test/save.test.js test/only.test.js test/video.test.js test/animation.test.js test/graphic.test.js test/parallel.test.js",
     "dev": "export NODE_ENV=development || set NODE_ENV=development&& npx ts-node-dev --inspect=9229 --respawn ./src/cli.ts",
     "prepack": "npm run build",
     "ncu": "npx ncu -u -x @types/inquirer -x inquirer"
@@ -31,6 +31,7 @@
     "cmd-ts": "^0.13.0",
     "dotenv": "^16.4.5",
     "inquirer": "^8.2.2",
+    "picocolors": "^1.1.1",
     "puppeteer": "^22.8.0",
     "sanitize-filename": "^1.6.3"
   },
