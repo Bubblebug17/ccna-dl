@@ -617,3 +617,4 @@ if (removed.length) {
   if ((argv.includes('--help') || argv.includes('-h')) && !argv.includes('--no-banner')) printBanner(version);
   run(cmd, argv);
 }
+

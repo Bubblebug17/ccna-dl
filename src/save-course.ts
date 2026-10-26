@@ -6,9 +6,9 @@ import sanitize = require('sanitize-filename');
 import {
   buildIndexHtml,
   chapterFileName,
-  entriesFromSavedChapters,
+  collectIndexEntries,
   IndexEntry,
-  mergeIndexEntries,
+  entriesFromSavedChapters,
   saveChapterHtml,
   SaveChapterResult,
 } from './save-chapter-html';
@@ -28,7 +28,8 @@ import { dedupeByFileId } from './chapter-ids';
 import { backoffMs, fmtDuration, mapPool } from './util/retry';
 import { delay } from './util/promise';
 import { createProgress } from './progress';
-import { isFontUrl, shortError, shortWarnings } from './warnings';
+import { failedSummary, isFontUrl, shortError, shortWarnings, stripUrl } from './warnings';
+import { isAuthFailure } from './hls-download';
 import { logFilePath, setLogFile } from './ui/log';
 import { DEFAULT_RECYCLE_EVERY, DEFAULT_RECYCLE_HEAP_MB, recycleReason } from './memory';
 
@@ -173,7 +174,7 @@ export async function saveLaunchCourseSite(
     if (previous.length === 0) {
       preLogs.push(`No hay ${FAILURES_FILE} con capítulos pendientes en ${siteDir}. Nada que reintentar.`);
     } else {
-      preLogs.push(`Reintentando ${todo.length} capítulo(s) fallido(s) de ${previous.length} anotados.`);
+      preLogs.push(`Reintentando ${todo.length} subcapítulo(s) pendientes de ${previous.length} anotados (se vuelven a abrir con la sesión actual).`);
       const missing = previous.filter((f) => !todo.some((u) => chapterIdFromUrl(u) === f.chapter));
       if (missing.length) {
         preLogs.push(`  · ${missing.length} no aparecen ahora en el outline: ${missing.map((m) => m.chapter).join(', ')}`);
@@ -202,7 +203,7 @@ export async function saveLaunchCourseSite(
   // recursos que no existen en el servidor: las fuentes se repiten en todo el curso -> un solo aviso
   const seenMissing = new Set<string>();
   let fontsWarned = false;
-  for (const l of preLogs) log(l);
+  for (const l of preLogs) log(l, 1, 'info');
   for (const d of dedup.dropped) {
     warn(`Se ignora el elemento ${d.chapter}: usaría el mismo archivo (${chapterFileName(d.fileId)}) que ${d.keptChapter} y lo sobrescribiría.`);
   }
@@ -214,7 +215,7 @@ export async function saveLaunchCourseSite(
         (lanes > 1 ? ` · ${lanes} en paralelo` : '')
     );
     log(`Carpeta de salida: ${siteDir}`);
-    if (ownLogFile) log(`Registro detallado: ${join(siteDir, LOG_FILE)}`, 3);
+    if (ownLogFile) detail(`Registro detallado: ${join(siteDir, LOG_FILE)}`);
   }
 
   const outcomes: Array<ChapterOutcome | undefined> = new Array(todo.length);
@@ -237,7 +238,7 @@ export async function saveLaunchCourseSite(
       const c = checks[idx];
       const v = c.ok ? c.value : undefined;
       if (v && chapterUpToDate(v, wantVideos, wantAnimations)) {
-        log(`${name(chapter)}: ya guardado y verificado (se omite)`, 3);
+        detail(`${name(chapter)}: ya guardado y verificado (se omite)`);
         outcomes[idx] = { chapter, url: todo[idx], status: 'omitido' };
         progress.chapter(chapter).done('skip');
         continue;
@@ -252,7 +253,7 @@ export async function saveLaunchCourseSite(
             : wantAnimations && (v.animationsPending ?? 0) > 0
               ? `${v.animationsPending} animación(es) sin recursos locales (se grabarán)`
               : `formato antiguo (v${v.format}, faltan pestañas/fuentes)`;
-        log(`${name(chapter)}: se vuelve a descargar (${why})`, 3);
+        detail(`${name(chapter)}: se vuelve a descargar (${why})`);
       }
       queue.push(idx);
     }
@@ -272,7 +273,7 @@ export async function saveLaunchCourseSite(
     await emulateFocus(p);
   };
   const replacePage = async (w: Worker, why: string) => {
-    log(`Pestaña ${w.id + 1} del navegador: se reinicia (${why})`, 3);
+    detail(`Pestaña ${w.id + 1} del navegador: se reinicia (${why})`);
     const old = w.page;
     if (w.own) {
       await old.close().catch(() => undefined);
@@ -309,11 +310,12 @@ export async function saveLaunchCourseSite(
     let res: SaveChapterResult | null = null;
     let lastError = '';
     let fullRecapture = false;
+    let videoRecapture = false;
     for (let attempt = 1; attempt <= chapterAttempts; attempt++) {
       try {
         if (attempt > 1) {
           const wait = backoffMs(attempt - 2, 1000, 8000);
-          log(`${label}: reintento ${attempt - 1}/${chapterAttempts - 1} en ${Math.round(wait / 1000)}s (${lastError})`, 3);
+          detail(`${label}: reintento ${attempt - 1}/${chapterAttempts - 1} en ${Math.round(wait / 1000)}s (${lastError})`);
           bar.stage(`reintento ${attempt - 1} en ${Math.round(wait / 1000)}s`);
           await delay(wait);
         }
@@ -333,7 +335,7 @@ export async function saveLaunchCourseSite(
             // Carga sin terminar al guardar (loader/skeleton visible): recarga y re-captura UNA vez, con más paciencia.
             if (r.ok && r.incomplete && !fullRecapture) {
               fullRecapture = true;
-              log(`${label}: carga sin terminar (${r.incomplete}); se recarga y se vuelve a capturar`, 3);
+              detail(`${label}: carga sin terminar (${r.incomplete}); se recarga y se vuelve a capturar`);
               await opts.prepareChapter(wp, chapterUrl);
               const r2 = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
                 prescrolled: !!opts.prepareScrolls,
@@ -345,6 +347,28 @@ export async function saveLaunchCourseSite(
                 onStage: (st) => bar.stage('2ª captura: ' + st),
               });
               if (r2.ok) r = { ...r2, recaptured: true };
+            }
+            // Vídeos con 403/401 (firma o cookies de la CDN caducadas): se vuelve a abrir el subcapítulo,
+            // se reactiva el reproductor para capturar una URL nueva del m3u8 y se baja con la sesión
+            // actual. Solo los vídeos que fallaron vuelven a pedirse (los demás ya están en disco).
+            const authVids = Object.entries(r.failedAssets).filter(([rel, why]) => /\.(mp4|webm|m4v|mov)$/i.test(rel) && isAuthFailure(why));
+            if (r.ok && wantVideos && authVids.length && !videoRecapture) {
+              videoRecapture = true;
+              detail(`${chapter} · ${authVids.length} vídeo(s) con acceso denegado; se reabre el subcapítulo para capturar URLs nuevas`);
+              for (const [rel] of authVids) {
+                downloaded.delete(rel);
+                assetReasons.delete(rel);
+              }
+              await opts.prepareChapter(wp, chapterUrl);
+              const r3 = await saveChapterHtml(wp, filePath, siteDir, downloaded, chapter, opts.assetOpts, assetReasons, {
+                prescrolled: !!opts.prepareScrolls,
+                videos: wantVideos,
+                animations: wantAnimations,
+                debugNetwork: opts.debugNetwork,
+                animationMaxMs: opts.animationMaxMs,
+                onStage: (st) => bar.stage('vídeos: ' + st),
+              });
+              if (r3.ok) r = { ...r3, recaptured: r.recaptured || r3.recaptured };
             }
             return r;
           })(),
@@ -360,7 +384,7 @@ export async function saveLaunchCourseSite(
         if (w.id > 0 && SESSION_RE.test(lastError) && w.done === 0) {
           if (!extraTabsDisabled) {
             extraTabsDisabled = true;
-            log(`Las pestañas extra del navegador no comparten la sesión (${lastError}); se continúa con una sola`, 3);
+            detail(`Las pestañas extra del navegador no comparten la sesión (${lastError}); se continúa con una sola`);
           }
           requeue.push(idx);
           w.retired = true;
@@ -390,13 +414,13 @@ export async function saveLaunchCourseSite(
       const label2 = name(chapter);
       const stats = `${res.assets} recursos, ${fmtMs(ms)}`;
       // detalle completo al registro (y en pantalla con -v 3)
-      for (const wtxt of res.warnings) log(`${chapter} · aviso: ${wtxt}`, 3);
-      for (const [rel, why] of failedAssets) log(`${chapter} · recurso fallido: ${rel} → ${why}`, 3);
+      for (const wtxt of res.warnings) detail(`${chapter} · aviso: ${wtxt}`);
+      for (const [rel, why] of failedAssets) detail(`${chapter} · recurso fallido: ${rel} → ${why}`);
       // recursos que no existen en el servidor: fuentes = un aviso para todo el curso; el resto, por subcapítulo
       const missing = res.missingOnServer ?? [];
       const fresh = missing.filter((u) => !seenMissing.has(u));
       for (const u of missing) seenMissing.add(u);
-      for (const u of fresh) log(`${chapter} · no existe en el servidor: ${u}`, 3);
+      for (const u of fresh) detail(`${chapter} · no existe en el servidor: ${u}`);
       const freshFonts = fresh.filter(isFontUrl);
       if (freshFonts.length && !fontsWarned) {
         fontsWarned = true;
@@ -412,7 +436,7 @@ export async function saveLaunchCourseSite(
       if (res.incomplete) {
         const reason = `captura posiblemente incompleta: ${res.incomplete}` + (failedAssets.length ? `; ${failedAssets.length} recursos fallidos` : '');
         warn(`${label2}: parcial, carga sin terminar${failedAssets.length ? `, ${failedAssets.length} recursos sin descargar` : ''}${short.length ? ', ' + short.join(', ') : ''}`);
-        log(`${chapter} · parcial: ${reason}`, 3);
+        detail(`${chapter} · parcial: ${reason}`);
         outcomes[idx] = {
           chapter,
           url: chapterUrl,
@@ -420,7 +444,8 @@ export async function saveLaunchCourseSite(
           reason,
           assets: res.assets,
           assetsFailed: failedAssets.length,
-          failedAssets: failedAssets.map(([rel, why]) => `${rel} → ${why}`),
+          failedAssets: failedAssets.map(([rel, why]) => `${rel} → ${stripUrl(why)}`),
+          ...(res.failedVideos?.length ? { failedVideos: res.failedVideos } : {}),
           ms,
         };
         bar.done('warn', { title, ms });
@@ -438,8 +463,9 @@ export async function saveLaunchCourseSite(
         };
         bar.done(short.length ? 'warn' : 'ok', { title, ms });
       } else {
-        const reason = `${failedAssets.length}/${res.assets} recursos no se descargaron: ${failedAssets[0][1]}`;
-        warn(`${label2}: parcial, ${failedAssets.length} de ${res.assets} recursos sin descargar${short.length ? ', ' + short.join(', ') : ''}`);
+        // UNA línea corta por subcapítulo; URLs y salida de ffmpeg solo en ccna-dl.log (-v 3)
+        const reason = failedSummary(res.failedAssets);
+        warn(`${label2}: ${reason}${short.length ? ' · ' + short.join(', ') : ''}`);
         outcomes[idx] = {
           chapter,
           url: chapterUrl,
@@ -447,14 +473,15 @@ export async function saveLaunchCourseSite(
           reason,
           assets: res.assets,
           assetsFailed: failedAssets.length,
-          failedAssets: failedAssets.map(([rel, why]) => `${rel} → ${why}`),
+          failedAssets: failedAssets.map(([rel, why]) => `${rel} → ${stripUrl(why)}`),
+          ...(res.failedVideos?.length ? { failedVideos: res.failedVideos } : {}),
           ms,
         };
         bar.done('warn', { title, ms });
       }
     } else {
       fail(`${label}: falló (${shortError(lastError)})`);
-      log(`${chapter} · error completo: ${lastError}`, 3);
+      detail(`${chapter} · error completo: ${lastError}`);
       outcomes[idx] = { chapter, url: chapterUrl, status: 'fallido', reason: lastError, ms };
       bar.done('fail', { ms });
     }
@@ -464,7 +491,7 @@ export async function saveLaunchCourseSite(
     const left = queue.length - doneCount;
     if (left > 0 && doneCount >= 2 && !progress.live) {
       const wall = (Date.now() - t0) / doneCount;
-      log(`Progreso ${doneCount}/${queue.length} · ETA ~${fmtDuration(wall * left)}`, 3);
+      detail(`Progreso ${doneCount}/${queue.length} · ETA ~${fmtDuration(wall * left)}`);
     }
   };
 
@@ -482,7 +509,7 @@ export async function saveLaunchCourseSite(
    * pestaña de la sesión -> solo about:blank (no se cierra: conserva la sesión).
    */
   const recycleTab = async (w: Worker, why: string) => {
-    log(`Pestaña ${w.id + 1} del navegador: reciclada (${why})`, 3);
+    detail(`Pestaña ${w.id + 1} del navegador: reciclada (${why})`);
     w.since = 0;
     recycled++;
     const old = w.page;
@@ -498,7 +525,7 @@ export async function saveLaunchCourseSite(
       w.page = await makePage();
       await prepareWorkerPage(w.page);
     } catch (e) {
-      log(`Pestaña ${w.id + 1} del navegador: no se pudo reabrir (${e instanceof Error ? e.message : e}); se retira`, 3);
+      detail(`Pestaña ${w.id + 1} del navegador: no se pudo reabrir (${e instanceof Error ? e.message : e}); se retira`);
       w.retired = true;
     }
   };
@@ -543,7 +570,7 @@ export async function saveLaunchCourseSite(
         await prepareWorkerPage(p);
         workers.push({ id: i, page: p, own: true, retired: false, done: 0, since: 0 });
       } catch (e) {
-        log(`No se pudo abrir la pestaña ${i + 1} del navegador: ${e instanceof Error ? e.message : e}`, 3);
+        detail(`No se pudo abrir la pestaña ${i + 1} del navegador: ${e instanceof Error ? e.message : e}`);
         break;
       }
     }
@@ -563,8 +590,8 @@ export async function saveLaunchCourseSite(
 
   // ---- índice: capítulos nuevos + los que ya estaban en disco (orden determinista) ----
   let indexPath: string | undefined;
-  const fromDisk = await entriesFromSavedChapters(chaptersDir);
-  const indexEntries = mergeIndexEntries(fromDisk, entries.filter((e): e is IndexEntry => !!e));
+  // índice anterior + HTML en disco + lo de esta ejecución: un reintento nunca cambia un título real por "Subtema …"
+  const indexEntries = await collectIndexEntries(siteDir, entries.filter((e): e is IndexEntry => !!e));
   if (indexEntries.length === 0) {
     warn('No hay subcapítulos guardados. No se actualiza index.html para no borrar el índice anterior.');
   } else {
