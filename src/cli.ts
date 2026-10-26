@@ -118,11 +118,6 @@ const cmd = command({
       description:
         'Valida OFFLINE (sin login) las descargas de --out-dir y escribe validation-report.md. No descarga nada.',
     }),
-    rebuildIndex: flag({
-      long: 'rebuild-index',
-      description:
-        'Regenera OFFLINE (sin login ni descargas) el index.html de los cursos en --out-dir a partir de lo ya guardado: recupera los títulos de los subtemas y corrige la numeración.',
-    }),
     retryFailed: flag({
       long: 'retry-failed',
       description:
@@ -228,10 +223,6 @@ const cmd = command({
   handler: async (args) => {
     setVerbosity(args.verbose);
     if (!args.noBanner && verbosity() >= 2) printBanner(version);
-    if (args.rebuildIndex) {
-      process.exitCode = await runRebuildIndex(args.outDir);
-      return;
-    }
     if (args.validate) {
       process.exitCode = runValidator(args.outDir);
       return;
@@ -627,25 +618,3 @@ if (removed.length) {
   run(cmd, argv);
 }
 
-async function runRebuildIndex(outDir: string): Promise<number> {
-  const { readdir, stat } = await import('fs/promises');
-  const { rebuildCourseIndex } = await import('./save-chapter-html');
-  const base = resolvePath(outDir);
-  const cands = [base];
-  for (const d of await readdir(base).catch(() => [] as string[])) cands.push(join(base, d));
-  let done = 0;
-  for (const dir of cands) {
-    const isCourse = await stat(join(dir, 'chapters')).then((s) => s.isDirectory()).catch(() => false);
-    if (!isCourse) continue;
-    const n = await rebuildCourseIndex(dir);
-    if (n) {
-      done++;
-      log.ok(`Índice regenerado (${n} secciones): ${join(dir, 'index.html')}`);
-    }
-  }
-  if (!done) {
-    log.error(`No se encontró ningún curso descargado (carpeta con chapters/) en ${base}`);
-    return 1;
-  }
-  return 0;
-}
