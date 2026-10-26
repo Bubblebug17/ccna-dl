@@ -2,7 +2,9 @@ import { c, colorsOn } from './ui/colors';
 import { Kind, log as ulog, Verbosity, verbosity } from './ui/log';
 import { LiveArea } from './ui/live';
 import { fmtMb, memText, monitor } from './ui/resource-monitor';
-import { fit, termHeight, termWidth, visLen } from './ui/text';
+import { canMoveCursor } from './ui/live';
+import { fit, padW, termHeight, termWidth, visLen } from './ui/text';
+import { cleanTitle, moduleTitleFrom } from './ui/titles';
 
 /**
  * Pantalla de carga por CAPÍTULO (módulo: 1, 2, 3…) y SUBCAPÍTULO (1.0, 1.1, 1.2…).
@@ -47,7 +49,8 @@ const fancy = colorsOn && (process.platform !== 'win32' || !!process.env.WT_SESS
 const SPIN = fancy ? ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] : ['|', '/', '-', '\\'];
 const FULL = fancy ? '█' : '#';
 const EMPTY = fancy ? '░' : '-';
-const ICON = { ok: '✔', warn: '⚠', fail: '✖', skip: '✔', pending: '·' };
+// Iconos de 1 columna (⚠ se pinta como emoji de 2 en Windows Terminal y desalinea): con fuente buena ✔ ✖ ! ·, si no ASCII.
+const ICON = fancy ? { ok: '✔', warn: '!', fail: '✖', skip: '✔', pending: '·' } : { ok: '+', warn: '!', fail: 'x', skip: '+', pending: '.' };
 /** Fases de un subcapítulo, en orden (para su avance). */
 const STAGES = ['abriendo', 'esperando', 'vídeos', 'animaciones', 'recursos', 'escribiendo'];
 const stageFrac = (s: string) => {
@@ -73,11 +76,11 @@ export function cmpIds(a: string, b: string): number {
   return 0;
 }
 
-type Sub = { id: string; title?: string; state: 'pending' | 'run' | 'done'; stage: string; t0: number; ms: number; mark?: ChapterMark };
+type Sub = { id: string; title?: string; raw?: string; state: 'pending' | 'run' | 'done'; stage: string; t0: number; ms: number; mark?: ChapterMark };
 type Mod = { id: string; subs: Sub[]; frozen: boolean };
 
 export function createProgress(ids: string[], opts: { enabled?: boolean } = {}): Progress {
-  const live = (opts.enabled ?? true) && !!process.stdout.isTTY && ids.length > 0;
+  const live = (opts.enabled ?? true) && canMoveCursor(process.stdout) && ids.length > 0;
   const t0 = Date.now();
   const subs = new Map<string, Sub>();
   const mods = new Map<string, Mod>();
@@ -94,7 +97,13 @@ export function createProgress(ids: string[], opts: { enabled?: boolean } = {}):
   let workedN = 0; // terminados en esta ejecución (no omitidos), para la ETA
   let frame = 0;
 
-  const modTitle = (m: Mod) => m.subs.find((s) => s.id === m.id)?.title ?? '';
+  const modTitle = (m: Mod) => {
+    for (const s of m.subs) {
+      const t = moduleTitleFrom(s.raw);
+      if (t) return t;
+    }
+    return m.subs.find((s) => s.id === m.id)?.title ?? '';
+  };
   const subFrac = (s: Sub) => (s.state === 'done' ? 1 : s.state === 'run' ? stageFrac(s.stage) : 0);
   const modFrac = (m: Mod) => m.subs.reduce((a, s) => a + subFrac(s), 0) / m.subs.length;
   const modDone = (m: Mod) => m.subs.every((s) => s.state === 'done');
@@ -113,7 +122,7 @@ export function createProgress(ids: string[], opts: { enabled?: boolean } = {}):
     const tail = ` ${barStr(frac, barSize(), color)} ${' '.repeat(pad)}${right}`;
     const head = `${' '.repeat(indent)}${icon} ${c.bold(id.padEnd(indent ? 5 : 3))}`;
     const room = w - visLen(head) - visLen(tail) - 1;
-    const t = room > 3 ? fit(title, room).padEnd(room) : '';
+    const t = room > 3 ? padW(fit(title, room), room) : '';
     return `${head} ${t}${tail}`;
   };
   const iconOf = (s: Sub) =>
@@ -212,7 +221,10 @@ export function createProgress(ids: string[], opts: { enabled?: boolean } = {}):
     log: (m, level = 2, kind) => ulog.at(level, m, kind),
     setTitle: (id, title) => {
       const s = subs.get(id);
-      if (s && title) s.title = title;
+      if (s && title) {
+        s.raw = title;
+        s.title = cleanTitle(id, title);
+      }
     },
     chapter: (id) => {
       const s = subs.get(id) ?? { id, state: 'pending', stage: '', t0: 0, ms: 0 };
@@ -229,7 +241,10 @@ export function createProgress(ids: string[], opts: { enabled?: boolean } = {}):
           if (s.state === 'done') return;
           s.state = 'done';
           s.mark = mark;
-          if (info?.title) s.title = info.title;
+          if (info?.title) {
+            s.raw = info.title;
+            s.title = cleanTitle(id, info.title);
+          }
           s.ms = info?.ms ?? (s.t0 ? Date.now() - s.t0 : 0);
           doneN++;
           if (mark !== 'skip') workedN++;
