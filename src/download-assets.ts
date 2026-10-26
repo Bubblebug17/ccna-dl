@@ -6,6 +6,7 @@ import { Readable } from 'stream';
 import { dirname, extname, join } from 'path';
 import { mapPool, withRetry } from './util/retry';
 import { ffmpegDownload, isStreamManifestUrl } from './ffmpeg-download';
+import { downloadStream } from './hls-download';
 
 export const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
@@ -114,14 +115,16 @@ async function fetchOnce(
   }
 }
 
-export type AssetResult = { ok: boolean; error?: string; bytes?: number; attempts: number };
+export type AssetResult = { ok: boolean; error?: string; bytes?: number; attempts: number; auth?: boolean };
 
 /** Descarga un recurso con reintentos/backoff, escritura atómica y comprobaciones. */
 export async function downloadAsset(
   absUrl: string,
   dest: string,
   headers: Record<string, string>,
-  opts: Pick<AssetOptions, 'retries' | 'backoffMs' | 'timeoutMs' | 'log'>
+  opts: Pick<AssetOptions, 'retries' | 'backoffMs' | 'timeoutMs' | 'log'> & { referer?: string },
+  /** Página con la sesión: los vídeos HLS se bajan con sus cookies (y desde el iframe si hace falta). */
+  page?: Page
 ): Promise<AssetResult> {
   // ya existe y no está vacío (reanudación): no se vuelve a bajar
   try {
@@ -163,6 +166,7 @@ export async function downloadAsset(
       const bytes = await withRetry(
         async () => {
           attempts++;
+          if (page) return downloadStream(page, url, dest, { referer: opts.referer || headers.Referer || '', timeoutMs: timeoutMs, retries: opts.retries, log: opts.log });
           return ffmpegDownload(url, dest, headers);
         },
         {
@@ -174,7 +178,7 @@ export async function downloadAsset(
       );
       return { ok: true, bytes, attempts };
     } catch (e) {
-      return { ok: false, error: errMsg(e), attempts };
+      return { ok: false, error: errMsg(e), attempts, auth: !!(e as { auth?: boolean }).auth };
     }
   };
   if (isStreamManifestUrl(absUrl) && /\.(mp4|webm|m4v|mov)$/i.test(dest)) return viaFfmpeg(absUrl);
@@ -338,7 +342,8 @@ export async function downloadAssets(
               Referer: opts.referer,
               ...(cookie ? { Cookie: cookie } : {}),
             },
-            opts
+            opts,
+            page
           );
         });
         // publicar el resultado en cuanto se tiene (otros capítulos esperan por él)

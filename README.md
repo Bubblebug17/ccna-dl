@@ -83,6 +83,10 @@ node lib/cli.js --validate --out-dir D:\cursos
 
 Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y se continúa con lo que falta. Con **Ctrl+C**, el programa termina de escribir los capítulos en curso y se detiene; para seguir, vuelve a ejecutar el mismo comando.
 
+### Vídeos y `--retry-failed`
+
+Los vídeos HLS (`.m3u8`, p. ej. `videos.netacad.com`) se descargan **con la sesión del navegador**: el manifiesto, la variante de más calidad y los segmentos se piden con las cookies actuales de esa URL, el User-Agent real y el Referer del reproductor (y, si la CDN aún responde 403, desde dentro del propio iframe del reproductor). ffmpeg solo une los segmentos ya descargados (sin red ni cabeceras en la línea de comandos). Si un vídeo da 401/403, el subcapítulo se vuelve a abrir **una vez** para reactivar el reproductor y capturar una URL nueva. Lo que siga fallando queda en `descarga-fallos.json` con identificadores estables (`videoId`, versión, idioma, archivo y número de reproductor; nunca la URL firmada) y `--retry-failed` lo reintenta con la sesión nueva. El HTML del subcapítulo se reescribe en el reintento: los vídeos que ya estaban en disco se reutilizan y el que faltaba solo pasa a ser local si se descarga bien (si no, sigue apuntando a internet).
+
 ## Opciones
 
 | Opción | Por defecto | Descripción |
@@ -93,7 +97,7 @@ Si ejecutas el mismo comando otra vez, se omiten los capítulos ya verificados y
 | `-c`, `--concurrency` | `2` (`1` en Termux) | Subcapítulos a la vez (pestañas), máximo 6. En Termux/Android el valor por defecto es 1 (puedes subirlo a mano). Baja automáticamente si hay poca RAM libre. Cada pestaña puede usar ~1 GB. |
 | `--only` | — | Solo parte del curso: `2`, `2.3`, `2.1,2.3,5`, `2.1-2.4`, `2-4`. El índice y el resumen se mezclan con lo ya descargado. |
 | `--force` | no | Vuelve a descargar aunque el capítulo ya exista y esté verificado. |
-| `--retry-failed` | no | Descarga solo los capítulos de `descarga-fallos.json`. |
+| `--retry-failed` | no | Vuelve a abrir solo los subcapítulos de `descarga-fallos.json` con la sesión actual (vídeos incluidos: se re-captura su URL). |
 | `--refresh-outline` | no | Con `--only`: ignora `outline-cache.json` y vuelve a leer el índice del curso. |
 | `--validate` | no | Valida sin conexión las descargas de `--out-dir` y escribe `validation-report.md`. No descarga nada. |
 | `--recycle-every` | `8` | Cada cuántos capítulos se reabre cada pestaña para liberar memoria (`0` = nunca). |
@@ -254,6 +258,7 @@ Dentro de Debian no se detecta Termux, por eso se indican `--browser-path` y los
 | «Sesión no válida» o errores de Netacad | Baja `--concurrency` a 1 y vuelve a ejecutar el mismo comando. |
 | Recursos con 404 en el resumen | Suelen ser archivos que faltan en el propio curso de Netacad. El capítulo se guarda igual. |
 | Los vídeos en streaming no se descargan | Instala ffmpeg o indica su ruta en `FFMPEG_PATH`. |
+| `N vídeos sin descargar (403, la sesión expiró)` | La firma/cookie del vídeo caducó. El programa ya reabre el subcapítulo una vez en la misma ejecución; si sigue, relanza con `--retry-failed` (se vuelve a activar el reproductor y se baja con la sesión nueva). Los detalles (URL, ffmpeg) están en `ccna-dl.log` o con `-v 3`. |
 | Algún capítulo queda `parcial`/`fallido` | Usa `--retry-failed`, o `--only X.Y --force`. Si tu conexión es lenta, sube `--min-wait`. |
 
 ## Más información

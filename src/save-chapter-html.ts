@@ -1,3 +1,4 @@
+import { videoRefFromUrl, type VideoRef } from './stream-auth';
 import { Page } from 'puppeteer';
 import { writeFile, mkdir, readdir, readFile, rename } from 'fs/promises';
 import { join } from 'path';
@@ -1043,6 +1044,8 @@ export type SaveChapterResult = {
   animations?: AnimationCaptureResult;
   /** Recursos que no existen en el servidor (404/410, o 403 con la sesión válida): URL de cada uno. */
   missingOnServer?: string[];
+  /** Vídeos que no se pudieron bajar, con referencias ESTABLES (id/versión/idioma/archivo, sin URL firmada). */
+  failedVideos?: VideoRef[];
 };
 
 export type SaveChapterOptions = {
@@ -1352,7 +1355,18 @@ export async function saveChapterHtml(
     videos: wantVideos ? videoCapture : undefined,
     animations: wantAnimations ? animCapture : undefined,
     missingOnServer: missingOnServer.length ? [...new Set(missingOnServer)] : undefined,
+    failedVideos: failedVideoRefs(data.assets, failed),
   };
+}
+
+function failedVideoRefs(assets: Record<string, string>, failed: Map<string, string>): VideoRef[] | undefined {
+  const videos = [...new Set(Object.values(assets))].filter((rel) => /(^|\/)assets\/video\//.test(rel) && /\.(mp4|webm|m4v|mov)$/i.test(rel));
+  const out: VideoRef[] = [];
+  for (const [abs, rel] of Object.entries(assets)) {
+    if (!failed.has(rel) || !videos.includes(rel) || out.some((r) => r.file === rel)) continue;
+    out.push({ ...videoRefFromUrl(abs, rel), index: videos.indexOf(rel) + 1 });
+  }
+  return out.length ? out : undefined;
 }
 
 export type IndexEntry = {

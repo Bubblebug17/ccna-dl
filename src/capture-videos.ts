@@ -1,3 +1,4 @@
+import { rememberStream } from './stream-auth';
 import type { HTTPResponse, Page } from 'puppeteer';
 
 /**
@@ -83,7 +84,22 @@ export async function captureVideos(page: Page, opts: CaptureOptions = {}): Prom
     try {
       const url = res.url();
       const type = (res.headers()['content-type'] || '').toLowerCase();
-      if (MEDIA_RE.test(url) || /mpegurl|dash\+xml|^video\//.test(type)) sniffed.push({ url, type });
+      if (MEDIA_RE.test(url) || /mpegurl|dash\+xml|^video\//.test(type)) {
+        sniffed.push({ url, type });
+        // contexto de la petición del reproductor (Referer/Origin/iframe) para descargarlo luego igual
+        try {
+          const rh = res.request().headers();
+          let frameUrl: string | undefined;
+          try {
+            frameUrl = res.frame()?.url();
+          } catch {
+            // sin frame
+          }
+          rememberStream(url, { referer: rh['referer'], origin: rh['origin'], frameUrl });
+        } catch {
+          // petición sin cabeceras
+        }
+      }
     } catch {
       // respuesta sin cabeceras
     }

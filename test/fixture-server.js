@@ -147,6 +147,10 @@ function createFixture(opts = {}) {
   const hits = {};
   const dl = {}; // peticiones del descargador de Node (no del navegador)
   const hung = new Set();
+  const grants = {};
+  const tokens = new Map();
+  const hlsLog = [];
+  const expOverride = {};
   const hungRes = [];
   const count = (k) => (hits[k] = (hits[k] || 0) + 1);
 
@@ -218,7 +222,14 @@ ${video ? `<script>
         box.innerHTML = '';
         box.appendChild(v);
         setTimeout(() => {
-          if ('${video}' === 'mp4') {
+          if ('${video}' === 'hlsauth') {
+            // Como Netacad: el reproductor obtiene una cookie firmada (CloudFront) y luego pide el m3u8 con ella
+            const vid = '${q.get('vid') || 'vid42'}';
+            fetch('/hlsauth/grant?vid=' + vid + '&exp=${q.get('exp') || 'none'}', { credentials: 'include' })
+              .then(() => fetch('/hlsauth/videos/' + vid + '/versions/1/locales/en-US/videohls/' + vid + '.m3u8', { credentials: 'include' }))
+              .then((r) => r.text()).catch(() => '');
+            v.src = URL.createObjectURL(new Blob([new Uint8Array(16)], { type: 'video/mp4' }));
+          } else if ('${video}' === 'mp4') {
             v.src = '/media/signed/abc123?token=1'; // URL firmada sin extensión
           } else {
             fetch('/hls/index.m3u8').then((r) => r.text()).catch(() => '');
@@ -351,7 +362,7 @@ ${anim ? `<script>
     const lp = path === '/launch' ? url.searchParams : null;
     if (lp) {
       const n = (lp.get('_chapter') || '1.1.1').split('.')[0];
-      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video', 'anim', 'graphic'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
+      const extra = ['slow', 'sticky', 'clean', 'hang', 'heavy', 'video', 'anim', 'graphic', 'vid', 'exp'].filter((k) => lp.get(k) && k !== 'hang').map((k) => `${k}=${lp.get(k)}`).join('&');
       return send(200, 'text/html', `<!doctype html><html><head><title>Launch ${n}</title></head><body><main id="main-content"><h1>Curso de prueba</h1><iframe src="/authoring-resources/ch${n}.html${extra ? '?' + extra : ''}" style="width:1000px;height:900px;border:0"></iframe></main></body></html>`);
     }
     const m = path.match(/^\/launch(\d+)\.html$/);
@@ -372,6 +383,34 @@ ${anim ? `<script>
     if (path === '/anim/data.json') return send(200, 'application/json', JSON.stringify({ durationMs: 3000 }));
     if (path === '/anim/sprite.png') return send(200, 'image/png', PNG);
     if (path === '/media/sub.vtt') return send(200, 'text/vtt', VTT);
+    // HLS protegido: cookie firmada por vídeo con usos limitados + Referer del iframe del reproductor
+    if (path === '/hlsauth/grant') {
+      const vid = url.searchParams.get('vid') || 'vid42';
+      const exp = expOverride[vid] || url.searchParams.get('exp') || 'none';
+      const n = (grants[vid] = (grants[vid] || 0) + 1);
+      const tok = `${vid}-t${n}-${Math.random().toString(36).slice(2, 8)}`;
+      // exp=first: la 1ª firma solo vale para la petición del propio reproductor (caduca antes de descargar)
+      // exp=all: todas caducan tras esa petición -> no hay forma de bajarlo (se queda como pendiente)
+      tokens.set(tok, { left: exp === 'all' || (exp === 'first' && n === 1) ? 1 : Infinity });
+      res.writeHead(200, { 'content-type': 'text/plain', 'set-cookie': `vtok=${tok}; Path=/hlsauth/videos/${vid}/; HttpOnly` });
+      return res.end('ok');
+    }
+    const ha = path.match(/^\/hlsauth\/videos\/([^/]+)\/versions\/1\/locales\/en-US\/videohls\/(.+)$/);
+    if (ha) {
+      const tok = (req.headers.cookie || '').match(/(?:^|;\s*)vtok=([^;]+)/)?.[1];
+      const t = tok && tokens.get(tok);
+      const okRef = /\/authoring-resources\//.test(req.headers.referer || '');
+      hlsLog.push({ path, tok: tok || null, referer: req.headers.referer || null, node: !req.headers['sec-ch-ua'], ok: !!(t && t.left > 0 && okRef) });
+      if (!t || t.left <= 0 || !okRef) return send(403, 'text/plain', 'Forbidden');
+      t.left--;
+      if (!makeMedia().ok) return send(404, 'text/plain', 'sin ffmpeg');
+      const f = ha[2];
+      if (f === `${ha[1]}.m3u8`) return send(200, 'application/vnd.apple.mpegurl', '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=100000\nlow.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=900000\nhigh.m3u8\n');
+      if (f === 'high.m3u8') return send(200, 'application/vnd.apple.mpegurl', makeMedia().m3u8);
+      if (f === 'low.m3u8') return send(500, 'text/plain', 'no debería elegirse');
+      const seg = path_.join(makeMedia().dir, 'hls', f);
+      return /^seg\d+\.ts$/.test(f) && fs.existsSync(seg) ? send(200, 'video/mp2t', fs.readFileSync(seg)) : send(404, 'text/plain', 'nope');
+    }
     if (path === '/hls/index.m3u8') return makeMedia().ok ? send(200, 'application/vnd.apple.mpegurl', makeMedia().m3u8) : send(404, 'text/plain', 'sin ffmpeg');
     if (/^\/hls\/seg\d+\.ts$/.test(path) && makeMedia().ok) {
       const f = path_.join(makeMedia().dir, path.slice(1));
@@ -396,6 +435,9 @@ ${anim ? `<script>
         base: `http://127.0.0.1:${port}`,
         hits,
         dl,
+        hlsLog,
+        grants,
+        setHlsExp: (vid, mode) => (expOverride[vid] = mode),
         resetHits: () => {
           Object.keys(hits).forEach((k) => delete hits[k]);
           Object.keys(dl).forEach((k) => delete dl[k]);

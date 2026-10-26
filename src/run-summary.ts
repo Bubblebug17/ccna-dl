@@ -1,3 +1,4 @@
+import type { VideoRef } from './stream-auth';
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 
@@ -15,6 +16,8 @@ export type ChapterOutcome = {
   assets?: number;
   assetsFailed?: number;
   failedAssets?: string[];
+  /** Vídeos que faltan, con referencias estables (sin URL firmada): para reintentarlos con --retry-failed. */
+  failedVideos?: VideoRef[];
   attempts?: number;
   ms?: number;
 };
@@ -25,6 +28,7 @@ export type FailureEntry = {
   reason: string;
   status: 'parcial' | 'fallido';
   failedAssets?: string[];
+  failedVideos?: VideoRef[];
   at: string;
 };
 
@@ -123,6 +127,7 @@ export function mergeFailures(
       reason: c.reason ?? 'error desconocido',
       status: c.status as 'parcial' | 'fallido',
       failedAssets: c.failedAssets?.slice(0, 50),
+      ...(c.failedVideos?.length ? { failedVideos: c.failedVideos.slice(0, 50) } : {}),
       at: now.toISOString(),
     }));
   return [...kept, ...fresh];
