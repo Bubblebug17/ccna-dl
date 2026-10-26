@@ -1,4 +1,5 @@
 import type { Page } from 'puppeteer';
+import { cleanTitle } from './ui/titles';
 import { mkdir, rename, writeFile } from 'fs/promises';
 import { join, resolve } from 'path';
 import sanitize = require('sanitize-filename');
@@ -197,7 +198,7 @@ export async function saveLaunchCourseSite(
     known.set(e.chapter, e.title);
     progress.setTitle(e.chapter, e.title);
   }
-  const name = (ch: string) => (known.get(ch) ? `${ch} ${known.get(ch)}` : ch);
+  const name = (ch: string) => (known.get(ch) ? `${ch} ${cleanTitle(ch, known.get(ch)) || known.get(ch)}` : ch);
   // recursos que no existen en el servidor: las fuentes se repiten en todo el curso -> un solo aviso
   const seenMissing = new Set<string>();
   let fontsWarned = false;
